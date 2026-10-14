@@ -9,7 +9,7 @@
 #include "esp_check.h"
 #include "esp_http_server.h"
 #include "esp_ota_ops.h"
-#include "esp_app_format.h"
+#include "esp_app_desc.h"
 
 #include "storage.h"
 #include "prog_job.h"

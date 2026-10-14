@@ -5,7 +5,7 @@
 #include "sdkconfig.h"
 #include "lvgl.h"
 #include "esp_log.h"
-#include "esp_app_format.h"
+#include "esp_app_desc.h"
 
 #include "drv_st7789v.h"
 #include "drv_touch_key.h"
@@ -737,7 +737,7 @@ void ui_main_start(void)
     lv_obj_set_size(top, LCD_H_RES, 28);
     lv_obj_clear_flag(top, LV_OBJ_FLAG_SCROLLABLE);
     make_label(top, "RL78 编程器", 10, 5, C_TEXT);
-    char ver[16];
+    char ver[40];
     snprintf(ver, sizeof(ver), "v%s", esp_app_get_description()->version);
     make_label(top, ver, 104, 5, C_MUTED);
     s.title_label = lv_label_create(top);

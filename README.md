@@ -136,6 +136,22 @@ Flash 块大小（默认 1KB）等均可在 menuconfig 中配置。
 | POST | `/api/program?file=<f>&erase=1&program=1&verify=1` | 启动烧录任务 |
 | POST | `/api/cancel` | 取消进行中的任务 |
 | GET | `/api/status` | 任务状态、进度、芯片信息与日志 |
+| GET | `/api/ota/info` | 当前固件版本、编译时间、运行分区 |
+| POST | `/api/ota` | 上传新固件（.bin）并 OTA 升级，成功后自动重启 |
+
+## 自身 OTA 升级
+
+设备固件可通过网页"固件升级 (OTA)"卡片在线更新：选择编译产物
+`build/offline_programmer.bin`，上传后设备自动校验镜像（魔数、芯片 ID、SHA256）、
+写入另一个 OTA 槽位并重启。
+
+- **分区布局**：`ota_0`/`ota_1` 双槽各 2MB（共 8MB Flash，存储区约 3.9MB）
+- **回滚保护**：新固件首次启动处于 `PENDING_VERIFY` 状态，所有服务正常初始化后
+  自动标记为有效；若新固件无法启动，bootloader 下次复位自动回滚到旧固件
+- **版本号**：在根 `CMakeLists.txt` 的 `PROJECT_VER` 中维护，
+  网页 OTA 卡片与 LCD 顶栏均显示当前版本
+- **注意**：从旧 factory 布局升级到 OTA 布局必须先用串口烧录一次
+  （`idf.py flash` 会自动写入初始 otadata），此后即可全部在线升级
 
 ## 注意事项
 
