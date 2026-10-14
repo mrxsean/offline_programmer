@@ -13,4 +13,5 @@ idf_component_register(SRCS "app_main.c"
                        INCLUDE_DIRS "."
                        EMBED_FILES "index.html"
                        REQUIRES driver esp_wifi esp_netif esp_http_server nvs_flash
-                                esp_timer esp_lcd esp_lcd_st7789 joltwallet__littlefs lvgl__lvgl)
+                                esp_timer esp_lcd esp_lcd_st7789 app_update esp_app_format
+                                joltwallet__littlefs lvgl__lvgl)

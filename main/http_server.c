@@ -8,6 +8,8 @@
 #include "esp_log.h"
 #include "esp_check.h"
 #include "esp_http_server.h"
+#include "esp_ota_ops.h"
+#include "esp_app_format.h"
 
 #include "storage.h"
 #include "prog_job.h"
@@ -268,6 +270,90 @@ static esp_err_t cancel_handler(httpd_req_t *req)
     return send_json(req, "{\"ok\":true}");
 }
 
+/* ---------------- OTA (self firmware update) ---------------- */
+
+static esp_err_t ota_info_handler(httpd_req_t *req)
+{
+    const esp_app_desc_t *desc = esp_app_get_description();
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    char buf[320];
+    snprintf(buf, sizeof(buf),
+             "{\"ok\":true,\"version\":\"%s\",\"project\":\"%s\","
+             "\"date\":\"%s\",\"time\":\"%s\",\"partition\":\"%s\"}",
+             desc->version, desc->project_name, desc->date, desc->time,
+             running ? running->label : "?");
+    return send_json(req, buf);
+}
+
+static void ota_restart_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(1500));
+    esp_restart();
+}
+
+static esp_err_t ota_handler(httpd_req_t *req)
+{
+    if (prog_job_busy()) {
+        return send_json_error(req, 500, "烧录进行中，无法升级");
+    }
+    const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);
+    if (!part) {
+        return send_json_error(req, 500, "无可用 OTA 分区");
+    }
+    ESP_LOGI(TAG, "OTA begin -> partition %s", part->label);
+
+    esp_ota_handle_t h;
+    esp_err_t err = esp_ota_begin(part, OTA_WITH_SEQUENTIAL_WRITES, &h);
+    if (err != ESP_OK) {
+        return send_json_error(req, 500, "OTA 初始化失败");
+    }
+
+    uint8_t *buf = malloc(4096);
+    if (!buf) {
+        esp_ota_abort(h);
+        return send_json_error(req, 500, "内存不足");
+    }
+
+    int remaining = req->content_len;
+    while (remaining > 0) {
+        int chunk = remaining > 4096 ? 4096 : remaining;
+        int r = httpd_req_recv(req, (char *)buf, chunk);
+        if (r <= 0) {
+            err = ESP_ERR_TIMEOUT;
+            break;
+        }
+        err = esp_ota_write(h, buf, r);
+        if (err != ESP_OK) {
+            break;
+        }
+        remaining -= r;
+    }
+    free(buf);
+
+    if (err == ESP_OK) {
+        err = esp_ota_end(h);   /* validates the image (magic, chip id, sha256) */
+    } else {
+        esp_ota_abort(h);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "OTA failed: %s", esp_err_to_name(err));
+        prog_log("OTA 升级失败: %s", esp_err_to_name(err));
+        return send_json_error(req, 500, "固件校验失败（非有效固件镜像）");
+    }
+
+    err = esp_ota_set_boot_partition(part);
+    if (err != ESP_OK) {
+        return send_json_error(req, 500, "设置启动分区失败");
+    }
+
+    ESP_LOGI(TAG, "OTA success, rebooting into %s", part->label);
+    prog_log("OTA 升级完成，设备重启中 ...");
+    send_json(req, "{\"ok\":true}");
+    xTaskCreate(ota_restart_task, "ota_rst", 2048, NULL, 5, NULL);
+    return ESP_OK;
+}
+
 static const char *state_str(prog_state_t s)
 {
     switch (s) {
@@ -386,6 +472,8 @@ esp_err_t http_server_start(void)
         { .uri = "/api/program", .method = HTTP_POST,   .handler = program_handler },
         { .uri = "/api/cancel",  .method = HTTP_POST,   .handler = cancel_handler },
         { .uri = "/api/status",  .method = HTTP_GET,    .handler = status_handler },
+        { .uri = "/api/ota",     .method = HTTP_POST,   .handler = ota_handler },
+        { .uri = "/api/ota/info",.method = HTTP_GET,    .handler = ota_info_handler },
     };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &uris[i]), TAG, "register uri failed");
