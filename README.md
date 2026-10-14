@@ -1,6 +1,9 @@
-# RL78 离线编程器（ESP32-C3）
+# RL78 离线编程器（ESP32-S3）
 
-基于 ESP32-C3 的 Renesas RL78 系列 MCU 脱机烧写器。设备创建 WiFi 热点并提供
+> 当前分支 `esp32s3` 适配 ESP32-S3（8MB Flash + 2MB PSRAM）；
+> ESP32-C3 版本请切换到 `master` 分支。
+
+基于 ESP32-S3 的 Renesas RL78 系列 MCU 脱机烧写器。设备创建 WiFi 热点并提供
 HTTP 服务，通过浏览器即可完成固件文件的上传、管理与目标芯片的擦除、编程、校验操作，
 无需连接电脑或专用烧录器。
 
@@ -17,15 +20,18 @@ HTTP 服务，通过浏览器即可完成固件文件的上传、管理与目标
 
 ## 硬件连接
 
-| ESP32-C3 引脚 | 连接目标 RL78 | 说明 |
+| ESP32-S3 引脚 | 连接目标 RL78 | 说明 |
 | --- | --- | --- |
-| GPIO6（TOOL0_TX） | TOOL0 | 经约 1kΩ 电阻串联 |
-| GPIO7（TOOL0_RX） | TOOL0 | 直接连接（与 TX 在目标侧汇合） |
-| GPIO10（RESET） | RESET | 直接连接 |
+| GPIO42（TOOL0_TX） | TOOL0 | 经约 1kΩ 电阻串联 |
+| GPIO44（TOOL0_RX） | TOOL0 | 直接连接（与 TX 在目标侧汇合） |
+| GPIO43（RESET） | RESET | 直接连接 |
 | GND | GND | 共地必须连接 |
 
 - TX 与 RX 在 TOOL0 处汇合构成单线半双工；串联电阻用于避免双方同时驱动时的总线冲突。
-- ESP32-C3 为 3.3V 电平：目标板工作电压为 3.3V 时可直连；目标为 5V 供电时，
+- GPIO43/44 是 UART0 控制台默认引脚，本固件已将日志控制台切换到
+  **USB Serial/JTAG**（GPIO19/20 的 USB 口），烧录/调试请使用该 USB 口；
+  用 UART0 口烧录固件不受影响（esptool 直接使用 ROM 引导）。
+- ESP32-S3 为 3.3V 电平：目标板工作电压为 3.3V 时可直连；目标为 5V 供电时，
   RL78 的输入高电平阈值约为 0.7×VDD（3.5V），建议加电平转换电路。
 - 目标板可由本设备 3.3V 供电（电流允许时），或独立供电（烧录前需上电）。
 - 引脚可在 `idf.py menuconfig` → `Offline Programmer Configuration` 中修改。
@@ -50,12 +56,12 @@ Serial Programming Guide》。
 
 ```bash
 source ~/esp/v5.3/esp-idf/export.sh
-idf.py set-target esp32c3
+idf.py set-target esp32s3
 idf.py build
-idf.py -p /dev/ttyUSB0 flash monitor
+idf.py -p /dev/ttyUSB0 flash monitor   # monitor 请用 USB Serial/JTAG 口
 ```
 
-分区布局（4MB Flash）：factory 1.5MB + LittleFS 存储 2.5MB，见 `partitions.csv`。
+分区布局（8MB Flash）：factory 2MB + LittleFS 存储约 6MB，见 `partitions.csv`。
 
 ## 使用说明
 
