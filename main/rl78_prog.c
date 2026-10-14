@@ -173,12 +173,15 @@ static esp_err_t send_data_frame(const uint8_t *data, int len, bool last)
 static int recv_response(uint8_t *data, int max_len, uint32_t timeout_ms)
 {
     uint8_t hdr[2];
-    if (read_exact(hdr, 2, timeout_ms) != 2) {
-        ESP_LOGW(TAG, "resp header timeout");
+    int hn = read_exact(hdr, 2, timeout_ms);
+    if (hn != 2) {
+        ESP_LOGW(TAG, "resp header timeout (%d/2 bytes)", hn);
         return -1;
     }
     if (hdr[0] != STX) {
-        ESP_LOGW(TAG, "resp bad start 0x%02X", hdr[0]);
+        uint8_t extra[8];
+        int n = uart_read_bytes(s_uart, extra, sizeof(extra), pdMS_TO_TICKS(30));
+        ESP_LOGW(TAG, "resp bad start: %02X %02X (+%dB) - line noise or wrong baud?", hdr[0], hdr[1], n);
         return -2;
     }
     int dlen = (hdr[1] == 0) ? 256 : hdr[1];
@@ -196,13 +199,15 @@ static int recv_response(uint8_t *data, int max_len, uint32_t timeout_ms)
         ESP_LOGW(TAG, "resp bad end 0x%02X", tail[1]);
         return -2;
     }
-    uint8_t sum = hdr[1];
-    uint32_t acc = sum;
+    /* SUM must equal the two's complement of (LEN + DATA bytes) */
+    uint32_t acc = 0;
+    acc -= hdr[1];
     for (int i = 0; i < dlen; i++) {
         acc -= data[i];
     }
     if ((uint8_t)(acc & 0xFF) != tail[0]) {
-        ESP_LOGW(TAG, "resp checksum error");
+        ESP_LOGW(TAG, "resp checksum error: calc 0x%02X != recv 0x%02X (len=%d)",
+                 (uint8_t)(acc & 0xFF), tail[0], dlen);
         return -4;
     }
     return dlen;
@@ -313,10 +318,13 @@ esp_err_t rl78_prog_init(void)
     return ESP_OK;
 }
 
-esp_err_t rl78_enter_programming_mode(rl78_signature_t *sig)
+/*
+ * Single mode-entry attempt. NOTE: all short delays use esp_rom_delay_us()
+ * because pdMS_TO_TICKS() truncates to 0 below 10ms (CONFIG_FREERTOS_HZ=100),
+ * which previously collapsed the critical TOOL0-low hold time.
+ */
+static esp_err_t try_enter_once(void)
 {
-    s_last_nack = 0;
-
     /* Take manual control of TOOL0 (TX pin) */
     gpio_reset_pin(s_tx_gpio);
     gpio_set_direction(s_tx_gpio, GPIO_MODE_OUTPUT);
@@ -324,39 +332,52 @@ esp_err_t rl78_enter_programming_mode(rl78_signature_t *sig)
     /* Mode entry sequence: TOOL0 low while RESET rises */
     gpio_set_level(s_reset_gpio, 0);
     gpio_set_level(s_tx_gpio, 0);
-    vTaskDelay(pdMS_TO_TICKS(1));
+    esp_rom_delay_us(5000);
     uart_flush_input(s_uart);
     gpio_set_level(s_reset_gpio, 1);
-    vTaskDelay(pdMS_TO_TICKS(3));
+    esp_rom_delay_us(10000);    /* tHD: keep TOOL0 low after RESET release */
 
     /* Release TOOL0: hand the pin back to the UART (idle level high) */
     ESP_RETURN_ON_ERROR(uart_set_pin(s_uart, s_tx_gpio, s_rx_gpio, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE),
                         TAG, "uart re-attach failed");
-    vTaskDelay(pdMS_TO_TICKS(1));
+    esp_rom_delay_us(5000);     /* allow the target UART to initialise */
     uart_flush_input(s_uart);
 
     /* Select 1-wire UART mode */
     uint8_t mode = SET_MODE_1WIRE_UART;
     uart_write_bytes(s_uart, &mode, 1);
     uart_wait_tx_done(s_uart, pdMS_TO_TICKS(T_ECHO));
-    uint8_t echo;
-    uart_read_bytes(s_uart, &echo, 1, pdMS_TO_TICKS(T_ECHO));
-    vTaskDelay(pdMS_TO_TICKS(1));
+    uint8_t echo = 0;
+    int e = uart_read_bytes(s_uart, &echo, 1, pdMS_TO_TICKS(T_ECHO));
+    if (e == 1 && echo == SET_MODE_1WIRE_UART) {
+        ESP_LOGI(TAG, "mode byte echo OK (TX/RX loop works)");
+    } else {
+        ESP_LOGW(TAG, "mode byte echo missing (r=%d v=0x%02X): check TOOL0 wiring/levels", e, echo);
+    }
+    esp_rom_delay_us(2000);
 
     /* Negotiate baud rate */
-    esp_err_t err = cmd_baud_rate_set(CONFIG_PROG_BAUD_RATE, CONFIG_PROG_TARGET_VOLTAGE_X10);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "baud rate set failed (no target response?)");
-        return ESP_ERR_NOT_FOUND;
-    }
+    return cmd_baud_rate_set(CONFIG_PROG_BAUD_RATE, CONFIG_PROG_TARGET_VOLTAGE_X10);
+}
 
-    /* Read silicon signature */
-    err = cmd_silicon_signature(sig);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "silicon signature failed");
-        return ESP_ERR_INVALID_RESPONSE;
+esp_err_t rl78_enter_programming_mode(rl78_signature_t *sig)
+{
+    s_last_nack = 0;
+    esp_err_t err = ESP_FAIL;
+
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        err = try_enter_once();
+        if (err == ESP_OK) {
+            err = cmd_silicon_signature(sig);
+        }
+        if (err == ESP_OK) {
+            return ESP_OK;
+        }
+        ESP_LOGW(TAG, "enter programming mode: attempt %d failed", attempt);
+        vTaskDelay(pdMS_TO_TICKS(30));
     }
-    return ESP_OK;
+    ESP_LOGE(TAG, "cannot enter programming mode: target not responding");
+    return ESP_ERR_NOT_FOUND;
 }
 
 void rl78_reset_target(void)
