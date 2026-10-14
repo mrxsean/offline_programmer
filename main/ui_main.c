@@ -24,7 +24,8 @@ static const char *TAG = "ui";
 #define C_ERR     0xE74C3C
 #define C_WARN    0xF1C40F
 
-#define UI_FONT   (&lv_font_simsun_16_cjk)
+LV_FONT_DECLARE(lv_font_prog_cjk_16);
+#define UI_FONT   (&lv_font_prog_cjk_16)
 
 #define PAGE_STATUS 0
 #define PAGE_FILES  1
@@ -490,6 +491,9 @@ static void refresh_cb(lv_timer_t *t)
 static void key_cb(lv_timer_t *t)
 {
     (void)t;
+    if (que_key == NULL) {
+        return;   /* touch driver not initialized yet */
+    }
     key_msg_t m;
     while (xQueueReceive(que_key, &m, 0) == pdTRUE) {
         if (m.evt == KEY_EVT_RELEASE) {
@@ -552,17 +556,17 @@ static void build_status_page(lv_obj_t *parent)
 {
     lv_obj_t *card = make_card(parent, 4, 2, 296, 96);
     make_label(card, "目标芯片", 2, 0, C_MUTED);
-    s.chip_label = make_label(card, "未连接", 2, 20, C_TEXT);
-    s.chip_detail = make_label(card, "按 OK 连接目标芯片", 2, 42, C_MUTED);
-    s.connect_row = make_row(card, 62, 280, 24);
+    s.chip_label = make_label(card, "未连接", 2, 19, C_TEXT);
+    s.chip_detail = make_label(card, "按 OK 连接目标芯片", 2, 38, C_MUTED);
+    s.connect_row = make_row(card, 57, 280, 22);
     lv_obj_set_style_bg_color(s.connect_row, lv_color_hex(C_ACCENT), 0);
-    s.connect_text = make_label(s.connect_row, "连 接 芯 片", 4, 2, 0xFFFFFF);
+    s.connect_text = make_label(s.connect_row, "连 接 芯 片", 4, 1, 0xFFFFFF);
 
-    lv_obj_t *card2 = make_card(parent, 4, 102, 296, 76);
+    lv_obj_t *card2 = make_card(parent, 4, 102, 296, 86);
     make_label(card2, "系统信息", 2, 0, C_MUTED);
-    s.net_label = make_label(card2, "", 2, 20, C_TEXT);
-    s.stor_label = make_label(card2, "", 2, 40, C_TEXT);
-    s.job_label = make_label(card2, "任务状态: 空闲", 2, 58, C_MUTED);
+    s.net_label = make_label(card2, "", 2, 19, C_TEXT);
+    s.stor_label = make_label(card2, "", 2, 38, C_TEXT);
+    s.job_label = make_label(card2, "任务状态: 空闲", 2, 54, C_MUTED);
 }
 
 static void build_files_page(lv_obj_t *parent)
@@ -576,28 +580,27 @@ static void build_files_page(lv_obj_t *parent)
 
 static void build_prog_page(lv_obj_t *parent)
 {
-    lv_obj_t *card = make_card(parent, 4, 2, 296, 24);
-    make_label(card, "固件:", 2, 2, C_MUTED);
-    s.sel_file_label = make_label(card, "未选择", 44, 2, C_TEXT);
+    make_label(parent, "固件:", 8, 6, C_MUTED);
+    s.sel_file_label = make_label(parent, "未选择", 52, 6, C_TEXT);
 
     const char *names[3] = { "擦除 [√]", "编程 [√]", "校验 [√]" };
     for (int i = 0; i < 3; i++) {
-        s.opt_rows[i] = make_row(parent, 30 + i * 25, 296, 23);
+        s.opt_rows[i] = make_row(parent, 32 + i * 25, 296, 23);
         make_label(s.opt_rows[i], names[i], 6, 2, C_TEXT);
     }
-    s.start_row = make_row(parent, 108, 296, 26);
+    s.start_row = make_row(parent, 112, 296, 26);
     lv_obj_set_style_bg_color(s.start_row, lv_color_hex(C_OK), 0);
     s.start_text = make_label(s.start_row, "开 始 烧 录", 6, 4, 0xFFFFFF);
 
     s.bar = lv_bar_create(parent);
-    lv_obj_set_pos(s.bar, 4, 142);
+    lv_obj_set_pos(s.bar, 4, 146);
     lv_obj_set_size(s.bar, 296, 14);
     lv_obj_set_style_bg_color(s.bar, lv_color_hex(C_CARD), 0);
     lv_obj_set_style_bg_color(s.bar, lv_color_hex(C_ACCENT), LV_PART_INDICATOR);
     lv_bar_set_value(s.bar, 0, LV_ANIM_OFF);
 
-    s.stage_label = make_label(parent, "空闲", 4, 160, C_TEXT);
-    s.log_label = make_label(parent, "", 4, 178, C_MUTED);
+    s.stage_label = make_label(parent, "空闲", 4, 166, C_TEXT);
+    s.log_label = make_label(parent, "", 4, 184, C_MUTED);
     lv_obj_set_width(s.log_label, 296);
     lv_label_set_long_mode(s.log_label, LV_LABEL_LONG_CLIP);
 }
