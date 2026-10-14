@@ -9,11 +9,13 @@ HTTP 服务，通过浏览器即可完成固件文件的上传、管理与目标
 
 ## 功能特性
 
-- RL78 串行编程（Protocol A，1-wire UART 模式），适用于 RL78/G10/G11/G12/G13/G14 等
+- RL78 串行编程（Protocol A，1-wire UART 模式），适用于 RL78/G11/G12/G13/G14 等
   大多数 RL78 系列芯片
 - 支持固件格式：Intel HEX（.hex）、Motorola S-Record（.mot/.srec/.s19 等）、原始二进制（.bin）
 - WiFi SoftAP 热点 + 内嵌 Web 页面，手机/电脑浏览器直接操作
-- 固件文件管理：上传（带进度）、列表、下载、删除，存储于片内 LittleFS（约 2.5MB）
+- **320×240 LCD（ST7789V）+ 6 个 I2C 触摸按键的本地操作界面（LVGL 8.3）**，
+  与 Web 界面功能对等，可完全脱离浏览器使用
+- 固件文件管理：上传（带进度）、列表、下载、删除，存储于片内 LittleFS（约 6MB）
 - 烧录流程：按块空白检查 → 按需擦除 → 编程 → 校验，实时进度与日志
 - 读取硅签名（设备名称、代码/数据闪存大小、固件版本）
 - 全片擦除模式（仅勾选"擦除"时）
@@ -36,17 +38,52 @@ HTTP 服务，通过浏览器即可完成固件文件的上传、管理与目标
 - 目标板可由本设备 3.3V 供电（电流允许时），或独立供电（烧录前需上电）。
 - 引脚可在 `idf.py menuconfig` → `Offline Programmer Configuration` 中修改。
 
+### LCD 与触摸按键
+
+| 功能 | ESP32-S3 引脚 | 说明 |
+| --- | --- | --- |
+| LCD MOSI | GPIO48 | ST7789V，SPI2 @ 40MHz，横屏（MADCTL=0x60） |
+| LCD CLK | GPIO14 | |
+| LCD CS | GPIO47 | |
+| LCD DC (RS) | GPIO21 | |
+| LCD RST | GPIO13 | |
+| LCD 背光 | GPIO12 | LEDC PWM 调光（13bit / 400Hz） |
+| 触摸 SDA | GPIO6 | I2C1 @ 100kHz，触摸芯片地址 0x28（CAP1298 兼容） |
+| 触摸 SCL | GPIO5 | |
+| 触摸 INT | GPIO4 | 双边沿中断 |
+
+触摸按键（2×3）功能映射：
+
+| 按键 | 功能 |
+| --- | --- |
+| UP / DOWN | 移动光标（长按连发） |
+| OK | 确认：连接芯片 / 选定文件 / 切换选项 / 开始烧录 |
+| 长按 OK | 文件页：删除文件（3 秒内再按 OK 确认） |
+| MENU | 返回状态页 / 烧录中取消任务 |
+| MODE | 切换页面（状态 → 文件 → 烧录） |
+| ONOFF | 背光开关 |
+
+LCD 三个页面：**状态**（芯片签名、热点与存储信息、任务状态）、
+**文件**（列表、选定、删除）、**烧录**（擦除/编程/校验选项、进度条、最新日志）。
+与 Web 界面共享同一任务引擎（`prog_job`），两端操作状态互相同步。
+
 ## 软件架构
 
 ```
 main/
-├── app_main.c       # 入口：NVS / 存储 / UART / WiFi / HTTP 初始化
+├── app_main.c       # 入口：NVS / 存储 / UART / WiFi / HTTP / LCD / 触摸 初始化
 ├── rl78_prog.c/h    # RL78 Protocol A：模式进入、帧收发、擦除/编程/校验命令
 ├── image_parser.c/h # Intel HEX / S-Record / 二进制固件解析（段式存储）
 ├── storage.c/h      # LittleFS 文件系统（/storage 分区）
 ├── wifi_ap.c/h      # WiFi SoftAP
-├── http_server.c/h  # HTTP 服务（REST API + 烧录任务调度）
+├── prog_job.c/h     # 烧录任务引擎（HTTP 与 LCD UI 共用：状态、日志、调度）
+├── http_server.c/h  # HTTP 服务（REST API）
+├── drv_st7789v.c/h  # LCD 驱动 + LVGL 端口层 + 背光 PWM
+├── drv_touch_key.c/h# I2C 触摸按键（中断 + 长按/连发状态机）
+├── ui_main.c/h      # LVGL 界面（状态/文件/烧录三页 + 按键导航）
 └── index.html       # 内嵌 Web 管理页面
+components/
+└── esp_lcd_st7789/  # ST7789 esp_lcd panel 驱动（本地组件）
 ```
 
 烧录协议参考 Renesas 应用笔记 R01AN0815《RL78 Microcontrollers (RL78 Protocol A)

@@ -4,6 +4,11 @@ idf_component_register(SRCS "app_main.c"
                             "storage.c"
                             "wifi_ap.c"
                             "http_server.c"
+                            "prog_job.c"
+                            "drv_st7789v.c"
+                            "drv_touch_key.c"
+                            "ui_main.c"
                        INCLUDE_DIRS "."
                        EMBED_FILES "index.html"
-                       REQUIRES driver esp_wifi esp_netif esp_http_server nvs_flash joltwallet__littlefs)
+                       REQUIRES driver esp_wifi esp_netif esp_http_server nvs_flash
+                                esp_timer esp_lcd esp_lcd_st7789 joltwallet__littlefs lvgl__lvgl)

@@ -1,9 +1,9 @@
 /*
- * ESP32-C3 offline programmer for Renesas RL78 MCUs.
+ * ESP32-S3 offline programmer for Renesas RL78 MCUs.
  *
- * - WiFi SoftAP + HTTP server for firmware file management (upload / list /
- *   download / delete) and programming control.
- * - RL78 serial programming (Protocol A) over 1-wire UART (TOOL0 + RESET).
+ * - WiFi SoftAP + HTTP server for firmware file management and job control
+ * - ST7789V 320x240 LCD (LVGL) + 6 I2C touch keys for standalone operation
+ * - RL78 serial programming (Protocol A) over 1-wire UART (TOOL0 + RESET)
  */
 #include <stdio.h>
 #include "sdkconfig.h"
@@ -14,6 +14,10 @@
 #include "wifi_ap.h"
 #include "http_server.h"
 #include "rl78_prog.h"
+#include "prog_job.h"
+#include "drv_st7789v.h"
+#include "drv_touch_key.h"
+#include "ui_main.h"
 
 static const char *TAG = "main";
 
@@ -28,15 +32,22 @@ void app_main(void)
 
     ESP_ERROR_CHECK(storage_init());
     ESP_ERROR_CHECK(rl78_prog_init());
+    ESP_ERROR_CHECK(prog_job_init());
     ESP_ERROR_CHECK(wifi_ap_init());
     ESP_ERROR_CHECK(http_server_start());
 
+    /* LCD + LVGL + UI (all UI objects are created before the LVGL task starts) */
+    lcd_st7789v_start();
+    ui_main_start();
+    lcd_st7789v_run();
+    touch_key_start();
+
     ESP_LOGI(TAG, "============================================");
-    ESP_LOGI(TAG, "RL78 offline programmer ready");
+    ESP_LOGI(TAG, "RL78 offline programmer ready (ESP32-S3)");
     ESP_LOGI(TAG, "WiFi  SSID : %s", CONFIG_PROG_WIFI_SSID);
     ESP_LOGI(TAG, "TOOL0      : TX=GPIO%d RX=GPIO%d (tie to RL78 TOOL0)",
              CONFIG_PROG_TOOL0_TX_GPIO, CONFIG_PROG_TOOL0_RX_GPIO);
     ESP_LOGI(TAG, "RESET      : GPIO%d -> RL78 RESET", CONFIG_PROG_RESET_GPIO);
-    ESP_LOGI(TAG, "Baud rate  : %d", CONFIG_PROG_BAUD_RATE);
+    ESP_LOGI(TAG, "LCD        : ST7789V %dx%d, touch keys on I2C1", 320, 240);
     ESP_LOGI(TAG, "============================================");
 }

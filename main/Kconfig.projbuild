@@ -66,4 +66,40 @@ menu "Offline Programmer Configuration"
                 Erase block size of the target RL78. 1024 for most RL78 families.
     endmenu
 
+    menu "LCD (ST7789V 320x240)"
+        config PROG_LCD_SCLK_GPIO
+            int "LCD SCLK GPIO"
+            default 14
+        config PROG_LCD_MOSI_GPIO
+            int "LCD MOSI GPIO"
+            default 48
+        config PROG_LCD_CS_GPIO
+            int "LCD CS GPIO"
+            default 47
+        config PROG_LCD_DC_GPIO
+            int "LCD DC (RS) GPIO"
+            default 21
+        config PROG_LCD_RST_GPIO
+            int "LCD RST GPIO"
+            default 13
+        config PROG_LCD_BL_GPIO
+            int "LCD Backlight GPIO"
+            default 12
+        config PROG_LCD_PIXEL_CLOCK_HZ
+            int "LCD SPI pixel clock (Hz)"
+            default 40000000
+    endmenu
+
+    menu "Touch Keys (I2C)"
+        config PROG_TOUCH_SDA_GPIO
+            int "Touch I2C SDA GPIO"
+            default 6
+        config PROG_TOUCH_SCL_GPIO
+            int "Touch I2C SCL GPIO"
+            default 5
+        config PROG_TOUCH_INT_GPIO
+            int "Touch INT GPIO"
+            default 4
+    endmenu
+
 endmenu
