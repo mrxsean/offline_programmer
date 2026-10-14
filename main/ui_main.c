@@ -87,13 +87,11 @@ static struct {
     bool opt_verify;
     char selected_file[STORAGE_MAX_NAME];
 
-    bool backlight_on;
 } s = {
     .file_selected = -1,
     .opt_erase = true,
     .opt_program = true,
     .opt_verify = true,
-    .backlight_on = true,
 };
 
 /* ---------------- widget helpers ---------------- */
@@ -455,7 +453,7 @@ static void page_show(int page)
     }
     lv_label_set_text(s.title_label, s_page_names[page]);
     static const char *hints[PAGE_COUNT] = {
-        "MENU:切页   OK:连接   ONOFF:背光",
+        "MENU:切页   OK:连接   ONOFF:主页",
         "OK:选定   长按OK:删除   MODE:返回",
         "OK:切换/开始   MODE:返回/取消",
     };
@@ -561,10 +559,11 @@ static void key_cb(lv_timer_t *t)
         }
         uint16_t key = m.code & 0xFF;
 
-        /* ONOFF: backlight toggle (all pages) */
+        /* ONOFF: jump straight to the home (status) page from anywhere */
         if (key == KEY_ONOFF && m.evt == KEY_EVT_PRESS) {
-            s.backlight_on = !s.backlight_on;
-            lcd_backlight_set(s.backlight_on ? 100 : 0);
+            if (s.page != PAGE_STATUS) {
+                page_show(PAGE_STATUS);
+            }
             continue;
         }
         /* MODE (top-right): Back / cancel */
