@@ -1,0 +1,69 @@
+menu "Offline Programmer Configuration"
+
+    menu "WiFi AP"
+        config PROG_WIFI_SSID
+            string "WiFi SSID"
+            default "RL78-Flasher"
+            help
+                SSID of the WiFi hotspot created by the device.
+
+        config PROG_WIFI_PASSWORD
+            string "WiFi Password"
+            default "12345678"
+            help
+                WPA2 password, minimum 8 characters. Leave empty for an open network.
+
+        config PROG_WIFI_CHANNEL
+            int "WiFi Channel"
+            range 1 13
+            default 1
+    endmenu
+
+    menu "RL78 Target Interface"
+        config PROG_UART_NUM
+            int "UART Port Number"
+            range 0 1
+            default 1
+
+        config PROG_TOOL0_TX_GPIO
+            int "TOOL0 TX GPIO"
+            default 6
+            help
+                UART TX pin. Connect to RL78 TOOL0 through a ~1k resistor
+                (ties together with RX pin for 1-wire UART mode).
+
+        config PROG_TOOL0_RX_GPIO
+            int "TOOL0 RX GPIO"
+            default 7
+            help
+                UART RX pin. Connect directly to RL78 TOOL0.
+
+        config PROG_RESET_GPIO
+            int "RESET GPIO"
+            default 10
+            help
+                Connect to RL78 RESET pin.
+
+        config PROG_BAUD_RATE
+            int "Programming Baud Rate"
+            default 115200
+            help
+                One of 115200 / 250000 / 500000 / 1000000.
+                115200 is the most reliable choice for 1-wire UART.
+
+        config PROG_TARGET_VOLTAGE_X10
+            int "Target VDD x10"
+            range 18 55
+            default 33
+            help
+                Target supply voltage multiplied by 10 (e.g. 33 = 3.3V).
+                Reported to the target during baud rate setup.
+
+        config PROG_FLASH_BLOCK_SIZE
+            int "Flash Block Size (bytes)"
+            default 1024
+            help
+                Erase block size of the target RL78. 1024 for most RL78 families.
+    endmenu
+
+endmenu

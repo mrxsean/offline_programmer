@@ -1,53 +1,91 @@
-| Supported Targets | ESP32 | ESP32-C2 | ESP32-C3 | ESP32-C5 | ESP32-C6 | ESP32-C61 | ESP32-H2 | ESP32-P4 | ESP32-S2 | ESP32-S3 | Linux |
-| ----------------- | ----- | -------- | -------- | -------- | -------- | --------- | -------- | -------- | -------- | -------- | ----- |
+# RL78 离线编程器（ESP32-C3）
 
-# Hello World Example
+基于 ESP32-C3 的 Renesas RL78 系列 MCU 脱机烧写器。设备创建 WiFi 热点并提供
+HTTP 服务，通过浏览器即可完成固件文件的上传、管理与目标芯片的擦除、编程、校验操作，
+无需连接电脑或专用烧录器。
 
-Starts a FreeRTOS task to print "Hello World".
+## 功能特性
 
-(See the README.md file in the upper level 'examples' directory for more information about examples.)
+- RL78 串行编程（Protocol A，1-wire UART 模式），适用于 RL78/G10/G11/G12/G13/G14 等
+  大多数 RL78 系列芯片
+- 支持固件格式：Intel HEX（.hex）、Motorola S-Record（.mot/.srec/.s19 等）、原始二进制（.bin）
+- WiFi SoftAP 热点 + 内嵌 Web 页面，手机/电脑浏览器直接操作
+- 固件文件管理：上传（带进度）、列表、下载、删除，存储于片内 LittleFS（约 2.5MB）
+- 烧录流程：按块空白检查 → 按需擦除 → 编程 → 校验，实时进度与日志
+- 读取硅签名（设备名称、代码/数据闪存大小、固件版本）
+- 全片擦除模式（仅勾选"擦除"时）
 
-## How to use example
+## 硬件连接
 
-Follow detailed instructions provided specifically for this example.
+| ESP32-C3 引脚 | 连接目标 RL78 | 说明 |
+| --- | --- | --- |
+| GPIO6（TOOL0_TX） | TOOL0 | 经约 1kΩ 电阻串联 |
+| GPIO7（TOOL0_RX） | TOOL0 | 直接连接（与 TX 在目标侧汇合） |
+| GPIO10（RESET） | RESET | 直接连接 |
+| GND | GND | 共地必须连接 |
 
-Select the instructions depending on Espressif chip installed on your development board:
+- TX 与 RX 在 TOOL0 处汇合构成单线半双工；串联电阻用于避免双方同时驱动时的总线冲突。
+- ESP32-C3 为 3.3V 电平：目标板工作电压为 3.3V 时可直连；目标为 5V 供电时，
+  RL78 的输入高电平阈值约为 0.7×VDD（3.5V），建议加电平转换电路。
+- 目标板可由本设备 3.3V 供电（电流允许时），或独立供电（烧录前需上电）。
+- 引脚可在 `idf.py menuconfig` → `Offline Programmer Configuration` 中修改。
 
-- [ESP32 Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/stable/get-started/index.html)
-- [ESP32-S2 Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/latest/esp32s2/get-started/index.html)
-
-
-## Example folder contents
-
-The project **hello_world** contains one source file in C language [hello_world_main.c](main/hello_world_main.c). The file is located in folder [main](main).
-
-ESP-IDF projects are built using CMake. The project build configuration is contained in `CMakeLists.txt` files that provide set of directives and instructions describing the project's source files and targets (executable, library, or both).
-
-Below is short explanation of remaining files in the project folder.
+## 软件架构
 
 ```
-├── CMakeLists.txt
-├── pytest_hello_world.py      Python script used for automated testing
-├── main
-│   ├── CMakeLists.txt
-│   └── hello_world_main.c
-└── README.md                  This is the file you are currently reading
+main/
+├── app_main.c       # 入口：NVS / 存储 / UART / WiFi / HTTP 初始化
+├── rl78_prog.c/h    # RL78 Protocol A：模式进入、帧收发、擦除/编程/校验命令
+├── image_parser.c/h # Intel HEX / S-Record / 二进制固件解析（段式存储）
+├── storage.c/h      # LittleFS 文件系统（/storage 分区）
+├── wifi_ap.c/h      # WiFi SoftAP
+├── http_server.c/h  # HTTP 服务（REST API + 烧录任务调度）
+└── index.html       # 内嵌 Web 管理页面
 ```
 
-For more information on structure and contents of ESP-IDF projects, please refer to Section [Build System](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-guides/build-system.html) of the ESP-IDF Programming Guide.
+烧录协议参考 Renesas 应用笔记 R01AN0815《RL78 Microcontrollers (RL78 Protocol A)
+Serial Programming Guide》。
 
-## Troubleshooting
+## 构建与烧写
 
-* Program upload failure
+```bash
+source ~/esp/v5.3/esp-idf/export.sh
+idf.py set-target esp32c3
+idf.py build
+idf.py -p /dev/ttyUSB0 flash monitor
+```
 
-    * Hardware connection is not correct: run `idf.py -p PORT monitor`, and reboot your board to see if there are any output logs.
-    * The baud rate for downloading is too high: lower your baud rate in the `menuconfig` menu, and try again.
+分区布局（4MB Flash）：factory 1.5MB + LittleFS 存储 2.5MB，见 `partitions.csv`。
 
-## Technical support and feedback
+## 使用说明
 
-Please use the following feedback channels:
+1. 设备上电后创建热点：`RL78-Flasher`（默认密码 `12345678`）。
+2. 手机/电脑连接该热点，浏览器访问 `http://192.168.4.1`。
+3. 在"固件文件"页上传 .hex/.mot/.bin 文件，并点击"选择"。
+4. 接好目标板连线，可先在"目标芯片"页点击"连接/读取芯片信息"验证通信。
+5. 在"烧录控制"页勾选操作（默认 擦除+编程+校验），点击"开始烧录"，
+   实时查看进度条与运行日志。
 
-* For technical queries, go to the [esp32.com](https://esp32.com/) forum
-* For a feature request or bug report, create a [GitHub issue](https://github.com/espressif/esp-idf/issues)
+热点名称、密码、信道、烧录波特率（默认 115200）、目标电压（默认 3.3V）、
+Flash 块大小（默认 1KB）等均可在 menuconfig 中配置。
 
-We will get back to you as soon as possible.
+## HTTP API
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/` | Web 管理页面 |
+| GET | `/api/files` | 文件列表（含存储用量） |
+| POST | `/api/upload?name=<file>` | 上传固件（请求体为文件内容） |
+| GET | `/api/file?name=<file>` | 下载固件 |
+| DELETE | `/api/file?name=<file>` | 删除固件 |
+| POST | `/api/connect` | 进入编程模式并读取硅签名 |
+| POST | `/api/program?file=<f>&erase=1&program=1&verify=1` | 启动烧录任务 |
+| POST | `/api/cancel` | 取消进行中的任务 |
+| GET | `/api/status` | 任务状态、进度、芯片信息与日志 |
+
+## 注意事项
+
+- 烧写期间目标 RESET 由本设备控制；烧写完成后设备会复位目标并运行其应用程序。
+- 仅支持代码闪存的烧写/校验，不支持数据闪存（Data Flash）与安全位设置。
+- 若目标芯片 RESET 引脚被配置为普通 IO，需先断电，按住目标板复位拉低后上电再
+  进行连接（即上电时序进入编程模式）。

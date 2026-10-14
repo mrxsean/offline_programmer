@@ -22,7 +22,7 @@
   "idf.openOcdConfigs": [
     "board/esp32c3-builtin.cfg"
   ],
-  "idf.port": "detect",
+  "idf.port": "/dev/ttyACM0",
   "idf.currentSetup": "/home/sean/esp/v5.3/esp-idf",
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32c3"

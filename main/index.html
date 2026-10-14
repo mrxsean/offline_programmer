@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RL78 离线编程器</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; background:#eef1f6; color:#1f2733; min-height:100vh; }
+.container { max-width:880px; margin:0 auto; padding:16px; }
+header { background:linear-gradient(135deg,#1d5fd1,#12408f); color:#fff; border-radius:12px; padding:20px 24px; margin-bottom:16px; box-shadow:0 2px 8px rgba(0,0,0,.15); }
+header h1 { font-size:20px; font-weight:600; }
+header p { font-size:13px; opacity:.85; margin-top:4px; }
+.card { background:#fff; border-radius:12px; padding:18px 20px; margin-bottom:16px; box-shadow:0 1px 4px rgba(0,0,0,.08); }
+.card h2 { font-size:16px; font-weight:600; margin-bottom:14px; display:flex; align-items:center; gap:8px; }
+.card h2 .dot { width:8px; height:8px; border-radius:50%; background:#1d5fd1; }
+button { font-family:inherit; font-size:13px; border:none; border-radius:8px; padding:8px 16px; cursor:pointer; transition:.15s; }
+.btn-primary { background:#1d5fd1; color:#fff; }
+.btn-primary:hover { background:#1a52b4; }
+.btn-primary:disabled { background:#9db4d8; cursor:not-allowed; }
+.btn-danger { background:#f1f3f7; color:#c0392b; border:1px solid #e3d7d5; }
+.btn-danger:hover { background:#fbeae8; }
+.btn-ghost { background:#f1f3f7; color:#33415c; }
+.btn-ghost:hover { background:#e3e8f0; }
+.btn-sm { padding:4px 10px; font-size:12px; }
+.devinfo { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:10px; margin-top:12px; }
+.devinfo .item { background:#f6f8fb; border-radius:8px; padding:10px 12px; }
+.devinfo .label { font-size:11px; color:#7c8798; }
+.devinfo .value { font-size:14px; font-weight:600; margin-top:2px; word-break:break-all; }
+.upload-row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+.file-input-wrap { flex:1; min-width:200px; border:2px dashed #c5d0e0; border-radius:8px; padding:10px; text-align:center; color:#5b6b83; font-size:13px; cursor:pointer; }
+.file-input-wrap:hover { border-color:#1d5fd1; color:#1d5fd1; }
+.progress-outer { height:8px; background:#e7ebf2; border-radius:4px; overflow:hidden; margin-top:10px; display:none; }
+.progress-inner { height:100%; background:linear-gradient(90deg,#1d5fd1,#4d9df7); width:0%; transition:width .2s; }
+table { width:100%; border-collapse:collapse; margin-top:12px; font-size:13px; }
+th,td { text-align:left; padding:9px 8px; border-bottom:1px solid #edf0f5; }
+th { color:#7c8798; font-weight:500; font-size:12px; }
+tr.selected td { background:#eaf1fd; }
+tr:hover td { background:#f6f8fb; }
+tr.selected:hover td { background:#e2ecfc; }
+.empty-tip { text-align:center; color:#98a3b3; font-size:13px; padding:20px 0; }
+.opts { display:flex; gap:18px; flex-wrap:wrap; margin:12px 0; font-size:13px; }
+.opts label { display:flex; align-items:center; gap:6px; cursor:pointer; }
+.opts input { accent-color:#1d5fd1; width:15px; height:15px; }
+.status-line { display:flex; align-items:center; gap:10px; margin-top:12px; font-size:13px; }
+.state-badge { display:inline-block; padding:3px 12px; border-radius:20px; font-size:12px; font-weight:600; }
+.state-idle { background:#eef1f6; color:#5b6b83; }
+.state-run { background:#fff4d6; color:#a06a00; }
+.state-ok { background:#dff5e3; color:#1e7e34; }
+.state-fail { background:#fde3e1; color:#b02a20; }
+#log { background:#12181f; color:#b7e3c0; font-family:Consolas,Menlo,monospace; font-size:12px; line-height:1.6; border-radius:8px; padding:12px 14px; height:260px; overflow-y:auto; white-space:pre-wrap; word-break:break-all; }
+.usage { font-size:12px; color:#7c8798; margin-top:8px; }
+.row-flex { display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; }
+.toast { position:fixed; left:50%; bottom:32px; transform:translateX(-50%); background:#1f2733; color:#fff; padding:10px 20px; border-radius:8px; font-size:13px; opacity:0; transition:opacity .25s; pointer-events:none; z-index:99; }
+.toast.show { opacity:.95; }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>RL78 离线编程器</h1>
+    <p>基于 ESP32-C3 热点 + HTTP 的 Renesas RL78 系列 MCU 脱机烧写工具</p>
+  </header>
+
+  <div class="card">
+    <h2><span class="dot"></span>目标芯片</h2>
+    <div class="row-flex">
+      <span style="font-size:13px;color:#5b6b83">连接目标并读取硅签名（Silicon Signature）</span>
+      <button class="btn-ghost" id="btnConnect" onclick="connectTarget()">连接 / 读取芯片信息</button>
+    </div>
+    <div class="devinfo" id="devinfo" style="display:none">
+      <div class="item"><div class="label">设备名称</div><div class="value" id="devName">-</div></div>
+      <div class="item"><div class="label">设备编码</div><div class="value" id="devCode">-</div></div>
+      <div class="item"><div class="label">代码闪存</div><div class="value" id="devCodeSize">-</div></div>
+      <div class="item"><div class="label">数据闪存</div><div class="value" id="devDataSize">-</div></div>
+      <div class="item"><div class="label">固件版本</div><div class="value" id="devVer">-</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2><span class="dot"></span>固件文件</h2>
+    <div class="upload-row">
+      <label class="file-input-wrap" id="fileDrop">
+        <input type="file" id="fileInput" style="display:none">
+        <span id="fileNameTip">点击选择固件文件（.hex / .mot / .srec / .bin）</span>
+      </label>
+      <button class="btn-primary" id="btnUpload" onclick="uploadFile()" disabled>上传</button>
+    </div>
+    <div class="progress-outer" id="upProgressOuter"><div class="progress-inner" id="upProgress"></div></div>
+    <div class="usage" id="usageTip"></div>
+    <div id="fileTableWrap">
+      <table id="fileTable" style="display:none">
+        <thead><tr><th>文件名</th><th>大小</th><th style="width:190px">操作</th></tr></thead>
+        <tbody id="fileTbody"></tbody>
+      </table>
+      <div class="empty-tip" id="emptyTip">暂无固件文件，请先上传</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2><span class="dot"></span>烧录控制</h2>
+    <div style="font-size:13px;color:#5b6b83">当前固件：<b id="selFile" style="color:#1f2733">未选择</b></div>
+    <div class="opts">
+      <label><input type="checkbox" id="optErase" checked>擦除</label>
+      <label><input type="checkbox" id="optProgram" checked>编程</label>
+      <label><input type="checkbox" id="optVerify" checked>校验</label>
+    </div>
+    <div class="row-flex">
+      <button class="btn-primary" id="btnProgram" onclick="startProgram()" disabled>开始烧录</button>
+      <button class="btn-danger" id="btnCancel" onclick="cancelProgram()" style="display:none">取消</button>
+    </div>
+    <div class="progress-outer" id="pgProgressOuter" style="display:block;margin-top:14px"><div class="progress-inner" id="pgProgress"></div></div>
+    <div class="status-line">
+      <span>状态：</span><span class="state-badge state-idle" id="stateBadge">空闲</span>
+      <span id="stageText" style="color:#7c8798"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2><span class="dot"></span>运行日志</h2>
+    <div id="log"></div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+let selectedFile = null;
+let polling = null;
+
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2200);
+}
+
+function fmtSize(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1024*1024) return (n/1024).toFixed(1) + ' KB';
+  return (n/1024/1024).toFixed(2) + ' MB';
+}
+
+/* ---------- file list ---------- */
+async function refreshFiles() {
+  try {
+    const r = await fetch('/api/files');
+    const d = await r.json();
+    document.getElementById('usageTip').textContent =
+      '存储空间：已用 ' + fmtSize(d.used) + ' / 共 ' + fmtSize(d.total);
+    const tbody = document.getElementById('fileTbody');
+    tbody.innerHTML = '';
+    const has = d.files.length > 0;
+    document.getElementById('fileTable').style.display = has ? 'table' : 'none';
+    document.getElementById('emptyTip').style.display = has ? 'none' : 'block';
+    let selStillThere = false;
+    d.files.forEach(f => {
+      if (f.name === selectedFile) selStillThere = true;
+      const tr = document.createElement('tr');
+      if (f.name === selectedFile) tr.className = 'selected';
+      tr.innerHTML =
+        '<td>' + esc(f.name) + '</td><td>' + fmtSize(f.size) + '</td>' +
+        '<td><button class="btn-primary btn-sm" onclick="selectFile(\'' + jsq(f.name) + '\')">选择</button> ' +
+        '<button class="btn-ghost btn-sm" onclick="downloadFile(\'' + jsq(f.name) + '\')">下载</button> ' +
+        '<button class="btn-danger btn-sm" onclick="deleteFile(\'' + jsq(f.name) + '\')">删除</button></td>';
+      tbody.appendChild(tr);
+    });
+    if (!selStillThere && selectedFile) {
+      selectedFile = null;
+      updateSelUI();
+    }
+  } catch (e) { console.log(e); }
+}
+
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function jsq(s) { return s.replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
+
+function selectFile(name) {
+  selectedFile = name;
+  updateSelUI();
+  refreshFiles();
+}
+
+function updateSelUI() {
+  document.getElementById('selFile').textContent = selectedFile || '未选择';
+  document.getElementById('btnProgram').disabled = !selectedFile;
+}
+
+function downloadFile(name) {
+  window.location.href = '/api/file?name=' + encodeURIComponent(name);
+}
+
+async function deleteFile(name) {
+  if (!confirm('确定删除 "' + name + '" ?')) return;
+  const r = await fetch('/api/file?name=' + encodeURIComponent(name), { method:'DELETE' });
+  const d = await r.json();
+  toast(d.ok ? '已删除' : ('删除失败：' + (d.error || '')));
+  refreshFiles();
+}
+
+/* ---------- upload ---------- */
+const fileInput = document.getElementById('fileInput');
+document.getElementById('fileDrop').addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => {
+  if (fileInput.files.length) {
+    document.getElementById('fileNameTip').textContent = fileInput.files[0].name +
+      ' (' + fmtSize(fileInput.files[0].size) + ')';
+    document.getElementById('btnUpload').disabled = false;
+  }
+});
+
+function uploadFile() {
+  if (!fileInput.files.length) return;
+  const f = fileInput.files[0];
+  const xhr = new XMLHttpRequest();
+  const outer = document.getElementById('upProgressOuter');
+  const bar = document.getElementById('upProgress');
+  outer.style.display = 'block';
+  bar.style.width = '0%';
+  xhr.upload.onprogress = e => { if (e.lengthComputable) bar.style.width = (e.loaded/e.total*100).toFixed(0) + '%'; };
+  xhr.onload = () => {
+    outer.style.display = 'none';
+    let d = {};
+    try { d = JSON.parse(xhr.responseText); } catch(e) {}
+    if (xhr.status === 200 && d.ok) {
+      toast('上传成功');
+      fileInput.value = '';
+      document.getElementById('fileNameTip').textContent = '点击选择固件文件（.hex / .mot / .srec / .bin）';
+      document.getElementById('btnUpload').disabled = true;
+      refreshFiles();
+    } else {
+      toast('上传失败：' + (d.error || xhr.status));
+    }
+  };
+  xhr.onerror = () => { outer.style.display = 'none'; toast('上传失败：网络错误'); };
+  xhr.open('POST', '/api/upload?name=' + encodeURIComponent(f.name));
+  xhr.send(f);
+}
+
+/* ---------- target connect ---------- */
+async function connectTarget() {
+  const btn = document.getElementById('btnConnect');
+  btn.disabled = true;
+  btn.textContent = '连接中...';
+  try {
+    const r = await fetch('/api/connect', { method:'POST' });
+    const d = await r.json();
+    if (d.ok && d.device) {
+      document.getElementById('devinfo').style.display = 'grid';
+      document.getElementById('devName').textContent = d.device.name;
+      document.getElementById('devCode').textContent = d.device.code;
+      document.getElementById('devCodeSize').textContent = fmtSize(d.device.code_size);
+      document.getElementById('devDataSize').textContent = d.device.data_size ? fmtSize(d.device.data_size) : '无';
+      document.getElementById('devVer').textContent = d.device.version;
+      toast('目标连接成功');
+    } else {
+      toast('连接失败：' + (d.error || '目标无响应'));
+    }
+  } catch(e) { toast('连接失败：网络错误'); }
+  btn.disabled = false;
+  btn.textContent = '连接 / 读取芯片信息';
+  refreshStatus();
+}
+
+/* ---------- programming ---------- */
+async function startProgram() {
+  if (!selectedFile) return;
+  const erase = document.getElementById('optErase').checked ? 1 : 0;
+  const program = document.getElementById('optProgram').checked ? 1 : 0;
+  const verify = document.getElementById('optVerify').checked ? 1 : 0;
+  if (!erase && !program && !verify) { toast('请至少选择一项操作'); return; }
+  const r = await fetch('/api/program?file=' + encodeURIComponent(selectedFile) +
+    '&erase=' + erase + '&program=' + program + '&verify=' + verify, { method:'POST' });
+  const d = await r.json();
+  if (!d.ok) toast('启动失败：' + (d.error || ''));
+  refreshStatus();
+}
+
+async function cancelProgram() {
+  await fetch('/api/cancel', { method:'POST' });
+}
+
+/* ---------- status polling ---------- */
+let lastLogLen = 0;
+async function refreshStatus() {
+  try {
+    const r = await fetch('/api/status');
+    const d = await r.json();
+    const badge = document.getElementById('stateBadge');
+    const map = { idle:['空闲','state-idle'], running:['烧录中','state-run'], done:['完成','state-ok'], failed:['失败','state-fail'] };
+    const m = map[d.state] || map.idle;
+    badge.textContent = m[0];
+    badge.className = 'state-badge ' + m[1];
+    document.getElementById('stageText').textContent = (d.stage || '') +
+      (d.message ? ' — ' + d.message : '');
+    document.getElementById('pgProgress').style.width = (d.percent || 0) + '%';
+    document.getElementById('btnCancel').style.display = d.state === 'running' ? 'inline-block' : 'none';
+    document.getElementById('btnProgram').disabled = !selectedFile || d.state === 'running';
+    const logEl = document.getElementById('log');
+    if (d.log !== undefined && d.log.length !== lastLogLen) {
+      logEl.textContent = d.log;
+      logEl.scrollTop = logEl.scrollHeight;
+      lastLogLen = d.log.length;
+    }
+  } catch(e) {}
+}
+
+refreshFiles();
+updateSelUI();
+refreshStatus();
+polling = setInterval(refreshStatus, 800);
+</script>
+</body>
+</html>
