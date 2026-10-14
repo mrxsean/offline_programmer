@@ -17,6 +17,7 @@
 #include "prog_job.h"
 #include "drv_st7789v.h"
 #include "drv_touch_key.h"
+#include "drv_beep.h"
 #include "ui_main.h"
 
 static const char *TAG = "main";
@@ -29,6 +30,9 @@ void app_main(void)
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
+
+    beep_init();
+    beep_play(BEEP_PAT_BOOT);   /* power-on chirp */
 
     ESP_ERROR_CHECK(storage_init());
     ESP_ERROR_CHECK(rl78_prog_init());

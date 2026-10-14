@@ -102,4 +102,10 @@ menu "Offline Programmer Configuration"
             default 4
     endmenu
 
+    menu "Buzzer"
+        config PROG_BEEP_GPIO
+            int "Buzzer GPIO (passive, LEDC PWM)"
+            default 37
+    endmenu
+
 endmenu

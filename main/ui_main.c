@@ -8,6 +8,7 @@
 
 #include "drv_st7789v.h"
 #include "drv_touch_key.h"
+#include "drv_beep.h"
 #include "prog_job.h"
 #include "storage.h"
 
@@ -316,8 +317,10 @@ static void files_select(void)
         if (storage_delete(name) == ESP_OK) {
             prog_log("文件删除: %s", name);
             toast_show("已删除", 1500);
+            beep_play(BEEP_PAT_DONE);
         } else {
             toast_show("删除失败", 1500);
+            beep_play(BEEP_PAT_FAIL);
         }
         s.del_armed = false;
         files_refresh();
@@ -415,8 +418,10 @@ static void prog_action(void)
     req.verify = s.opt_verify;
     if (prog_job_start(&req) == ESP_OK) {
         toast_show("任务已启动", 1500);
+        beep_play(BEEP_PAT_START);
     } else {
         toast_show("任务启动失败", 2000);
+        beep_play(BEEP_PAT_FAIL);
     }
     prog_render_options();
 }
@@ -433,8 +438,10 @@ static void status_connect(void)
     lv_timer_handler();   /* force redraw before the blocking call */
     if (prog_job_connect(NULL) == ESP_OK) {
         toast_show("目标连接成功", 1500);
+        beep_play(BEEP_PAT_DONE);
     } else {
         toast_show("连接失败：目标无响应", 2500);
+        beep_play(BEEP_PAT_FAIL);
     }
     lv_label_set_text(s.connect_text, "连 接 芯 片");
 }
@@ -530,6 +537,15 @@ static void refresh_cb(lv_timer_t *t)
         lv_label_set_text(s.log_label, *p == '\n' ? p + 1 : p);
     }
 
+    /* job-finish audible alerts (fires regardless of trigger: LCD or Web) */
+    static prog_state_t last_state = PROG_IDLE;
+    if (last_state == PROG_RUNNING && snap.state == PROG_DONE) {
+        beep_play(BEEP_PAT_DONE);
+    } else if (last_state == PROG_RUNNING && snap.state == PROG_FAILED) {
+        beep_play(BEEP_PAT_FAIL);
+    }
+    last_state = snap.state;
+
     /* running state may change option-row availability */
     static bool was_busy = false;
     if (was_busy != (snap.state == PROG_RUNNING)) {
@@ -558,6 +574,13 @@ static void key_cb(lv_timer_t *t)
             continue;
         }
         uint16_t key = m.code & 0xFF;
+
+        /* audible click for every handled key press / auto-repeat */
+        if ((m.evt == KEY_EVT_PRESS || m.evt == KEY_EVT_REPEAT) &&
+            (key == KEY_UP || key == KEY_DOWN || key == KEY_OK ||
+             key == KEY_MENU || key == KEY_MODE || key == KEY_ONOFF)) {
+            beep_play(BEEP_PAT_KEY);
+        }
 
         /* ONOFF: jump straight to the home (status) page from anywhere */
         if (key == KEY_ONOFF && m.evt == KEY_EVT_PRESS) {
