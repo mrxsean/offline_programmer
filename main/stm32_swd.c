@@ -66,8 +66,13 @@ static void swd_write_bit(int b)
 
 static int swd_read_bit(void)
 {
+    /* SWD: the transmitter changes SWDIO on the falling edge and the
+     * receiver samples on the rising edge -> sample with clock HIGH. */
+    gpio_set_level(s_clk, 1);
+    esp_rom_delay_us(SWD_HALF_PERIOD_US);
     int b = gpio_get_level(s_dio);
-    swclk();
+    gpio_set_level(s_clk, 0);
+    esp_rom_delay_us(SWD_HALF_PERIOD_US);
     return b;
 }
 
@@ -167,8 +172,9 @@ static esp_err_t swd_transfer(int ap, int read, uint8_t reg, uint32_t *data)
             return ESP_OK;
         }
 
-        /* WAIT or FAULT: a few idle clocks, then recover */
+        /* WAIT or FAULT: a few idle clocks (drive low), then recover */
         dio_output();
+        gpio_set_level(s_dio, 0);
         for (int i = 0; i < 4; i++) {
             swclk();
         }
@@ -179,7 +185,12 @@ static esp_err_t swd_transfer(int ap, int read, uint8_t reg, uint32_t *data)
             uint32_t abort_val = 0x1E;
             swd_dp_write_raw(DP_ABORT, abort_val);
         } else {
-            ESP_LOGD(TAG, "WAIT (ap=%d reg=0x%X), retry %d", ap, reg, attempt + 1);
+            /* ack==0: line held low; ack==7: floating high (no target driving);
+               ack==2: WAIT; ack==3/5/6: garbled (timing?) */
+            ESP_LOGW(TAG, "no ACK=OK (ack=%d, ap=%d %s reg=0x%X, try %d)%s",
+                     ack, ap, read ? "RD" : "WR", reg, attempt + 1,
+                     ack == 0 ? " [line stuck low]" :
+                     ack == 7 ? " [line floating high - no target?]" : "");
         }
     }
     ESP_LOGE(TAG, "transfer failed (ap=%d %s reg=0x%X)", ap, read ? "RD" : "WR", reg);
@@ -254,7 +265,7 @@ uint32_t swd_idcode(void)
     return s_idcode;
 }
 
-esp_err_t swd_connect(void)
+static esp_err_t swd_connect_once(void)
 {
     s_idcode = 0;
 
@@ -263,6 +274,13 @@ esp_err_t swd_connect(void)
      * line, so release it to a hi-Z input while SWD is active. It is
      * re-claimed automatically the next time RL78 mode is entered. */
     gpio_reset_pin(CONFIG_PROG_TOOL0_TX_GPIO);
+
+    /* diagnose the undriven line level: with the internal pull-up SWDIO should
+     * read high; a low level here means the line is shorted or held down */
+    dio_input();
+    int idle_lvl = gpio_get_level(s_dio);
+    ESP_LOGI(TAG, "link idle: SWDIO=%d%s (expect 1)", idle_lvl,
+             idle_lvl ? "" : " <-- 线路被拉低，检查接线/短路");
 
     /* connect-under-reset: hold the target in reset while attaching
      * (no-op when the reset line is disabled) */
@@ -314,6 +332,20 @@ esp_err_t swd_connect(void)
         return err;
     }
     return ESP_OK;
+}
+
+esp_err_t swd_connect(void)
+{
+    esp_err_t err = ESP_FAIL;
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        err = swd_connect_once();
+        if (err == ESP_OK) {
+            return ESP_OK;
+        }
+        ESP_LOGW(TAG, "swd connect attempt %d failed", attempt);
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    return err;
 }
 
 void swd_disconnect(void)
