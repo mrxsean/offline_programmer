@@ -280,6 +280,16 @@ static esp_err_t swd_connect_once(void)
      * re-claimed automatically the next time RL78 mode is entered. */
     gpio_reset_pin(CONFIG_PROG_TOOL0_TX_GPIO);
 
+    /* Fully re-assert SWD pin ownership: the RL78/UART code runs before every
+     * SWD attempt and may leave the shared pins with a different direction /
+     * input-enable state, which corrupts both the self-test and the clock. */
+    gpio_reset_pin(s_clk);
+    gpio_set_direction(s_clk, GPIO_MODE_INPUT_OUTPUT);
+    gpio_set_level(s_clk, 0);
+    gpio_reset_pin(s_dio);
+    gpio_set_direction(s_dio, GPIO_MODE_OUTPUT);
+    gpio_set_level(s_dio, 1);
+
     /* diagnose the undriven line level: with the internal pull-up SWDIO should
      * read high; a low level here means the line is shorted or held down */
     dio_input();

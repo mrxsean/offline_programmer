@@ -79,7 +79,7 @@ typedef struct {
 } family_t;
 
 static const family_t s_families[] = {
-    { 0x410, STM32_STYLE_F1, "STM32F1 MD",   0x1FFFF7E0, 1024 },
+    { 0x410, STM32_STYLE_F1, "STM32F1/GD32F1 MD", 0x1FFFF7E0, 1024 },
     { 0x412, STM32_STYLE_F1, "STM32F1 LD",   0x1FFFF7E0, 1024 },
     { 0x414, STM32_STYLE_F1, "STM32F1 HD",   0x1FFFF7E0, 2048 },
     { 0x418, STM32_STYLE_F1, "STM32F105/107", 0x1FFFF7E0, 2048 },
@@ -221,6 +221,12 @@ esp_err_t stm32_connect(stm32_info_t *info)
     info->flash_kb = kb & 0xFFFF;
     if (info->flash_kb == 0 || info->flash_kb > 2048) {
         ESP_LOGW(TAG, "suspicious flash size %" PRIu32 " KB", info->flash_kb);
+    }
+    /* GD32 clones report STM32F103's medium-density DEV_ID (0x410) regardless
+     * of their real capacity; derive the F1 page size from the flash size
+     * (like OpenOCD does): >=128KB -> 2KB pages (e.g. GD32F103RCT6, 256KB). */
+    if (info->style == STM32_STYLE_F1) {
+        info->page_size = (info->flash_kb >= 128) ? 2048 : 1024;
     }
     ESP_LOGI(TAG, "%s, flash %" PRIu32 " KB", info->name, info->flash_kb);
 
