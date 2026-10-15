@@ -15,6 +15,7 @@
 #include "wifi_ap.h"
 #include "http_server.h"
 #include "rl78_prog.h"
+#include "stm32_swd.h"
 #include "prog_job.h"
 #include "drv_st7789v.h"
 #include "drv_touch_key.h"
@@ -37,6 +38,7 @@ void app_main(void)
 
     ESP_ERROR_CHECK(storage_init());
     ESP_ERROR_CHECK(rl78_prog_init());
+    swd_host_init();
     ESP_ERROR_CHECK(prog_job_init());
     ESP_ERROR_CHECK(wifi_ap_init());
     ESP_ERROR_CHECK(http_server_start());

@@ -17,6 +17,12 @@ extern "C" {
 
 typedef enum { PROG_IDLE, PROG_RUNNING, PROG_DONE, PROG_FAILED } prog_state_t;
 
+typedef enum {
+    PROG_TARGET_NONE = 0,
+    PROG_TARGET_RL78 = 1,
+    PROG_TARGET_STM32 = 2,
+} prog_target_t;
+
 typedef struct {
     char file[STORAGE_MAX_NAME];
     bool erase;
@@ -30,7 +36,11 @@ typedef struct {
     char message[192];
     uint32_t percent;
     bool dev_valid;
-    rl78_signature_t sig;
+    prog_target_t target;       /* detected target interface */
+    char dev_name[24];          /* RL78 device name or STM32 family name */
+    uint32_t dev_flash_kb;      /* code flash size in KB */
+    uint16_t dev_id;            /* STM32 DBGMCU DEV_ID (0 for RL78) */
+    rl78_signature_t sig;       /* valid when target == PROG_TARGET_RL78 */
 } prog_status_t;
 
 esp_err_t prog_job_init(void);

@@ -481,18 +481,23 @@ static void refresh_cb(lv_timer_t *t)
 
     /* status page */
     if (snap.dev_valid) {
-        lv_label_set_text(s.chip_label, snap.sig.device_name);
+        lv_label_set_text(s.chip_label, snap.dev_name);
         char det[96];
-        uint32_t data_kb = snap.sig.data_flash_end >= 0xF1000 ?
-                           (snap.sig.data_flash_end - 0xF1000 + 1) / 1024 : 0;
-        char dsz[16];
-        if (data_kb) {
-            snprintf(dsz, sizeof(dsz), "%luK", (unsigned long)data_kb);
+        if (snap.target == PROG_TARGET_STM32) {
+            snprintf(det, sizeof(det), "接口 SWD   闪存 %luK   DEV 0x%03X",
+                     (unsigned long)snap.dev_flash_kb, snap.dev_id);
         } else {
-            snprintf(dsz, sizeof(dsz), "无");
+            uint32_t data_kb = snap.sig.data_flash_end >= 0xF1000 ?
+                               (snap.sig.data_flash_end - 0xF1000 + 1) / 1024 : 0;
+            char dsz[16];
+            if (data_kb) {
+                snprintf(dsz, sizeof(dsz), "%luK", (unsigned long)data_kb);
+            } else {
+                snprintf(dsz, sizeof(dsz), "无");
+            }
+            snprintf(det, sizeof(det), "接口 UART   代码闪存 %luK   数据闪存 %s",
+                     (unsigned long)((snap.sig.code_flash_end + 1) / 1024), dsz);
         }
-        snprintf(det, sizeof(det), "代码闪存 %luK   数据闪存 %s",
-                 (unsigned long)((snap.sig.code_flash_end + 1) / 1024), dsz);
         lv_label_set_text(s.chip_detail, det);
     } else {
         lv_label_set_text(s.chip_label, "未连接");

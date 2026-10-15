@@ -1,5 +1,7 @@
-idf_component_register(SRCS "app_main.c"
+idf_component_register(SRCS "stm32_flash.c" "stm32_swd.c" "app_main.c"
                             "rl78_prog.c"
+                            "stm32_swd.c"
+                            "stm32_flash.c"
                             "image_parser.c"
                             "storage.c"
                             "wifi_ap.c"

@@ -11,8 +11,10 @@
 #include "freertos/semphr.h"
 #include "esp_log.h"
 #include "esp_check.h"
+#include "esp_heap_caps.h"
 
 #include "image_parser.h"
+#include "stm32_flash.h"
 
 static const char *TAG = "prog_job";
 
@@ -20,7 +22,7 @@ static const char *TAG = "prog_job";
 
 static struct {
     SemaphoreHandle_t mu;
-    SemaphoreHandle_t io_mu;        /* serializes target UART access */
+    SemaphoreHandle_t io_mu;        /* serializes target bus access */
     prog_state_t state;
     char stage[32];
     char message[192];
@@ -29,7 +31,12 @@ static struct {
     size_t log_len;
     bool cancel;
     bool dev_valid;
+    prog_target_t target;
+    char dev_name[24];
+    uint32_t dev_flash_kb;
+    uint16_t dev_id;
     rl78_signature_t sig;
+    stm32_info_t s32;
 } s_prog;
 
 void prog_log(const char *fmt, ...)
@@ -80,7 +87,36 @@ static void set_prog_state(prog_state_t state, const char *stage, const char *me
     xSemaphoreGive(s_prog.mu);
 }
 
-/* ---------------- programming task ---------------- */
+/* ---------------- target detection (called under io_mu) ---------------- */
+
+static esp_err_t detect_target(void)
+{
+    s_prog.dev_valid = false;
+
+    esp_err_t err = rl78_enter_programming_mode(&s_prog.sig);
+    if (err == ESP_OK) {
+        s_prog.target = PROG_TARGET_RL78;
+        strlcpy(s_prog.dev_name, s_prog.sig.device_name, sizeof(s_prog.dev_name));
+        s_prog.dev_flash_kb = (s_prog.sig.code_flash_end + 1) / 1024;
+        s_prog.dev_id = 0;
+        s_prog.dev_valid = true;
+        return ESP_OK;
+    }
+    prog_log("RL78 无响应，尝试 STM32 SWD ...");
+
+    err = stm32_connect(&s_prog.s32);
+    if (err == ESP_OK) {
+        s_prog.target = PROG_TARGET_STM32;
+        strlcpy(s_prog.dev_name, s_prog.s32.name, sizeof(s_prog.dev_name));
+        s_prog.dev_flash_kb = s_prog.s32.flash_kb;
+        s_prog.dev_id = s_prog.s32.dev_id;
+        s_prog.dev_valid = true;
+        return ESP_OK;
+    }
+    return ESP_ERR_NOT_FOUND;
+}
+
+/* ---------------- RL78 flow ---------------- */
 
 static const char *nack_hint(void)
 {
@@ -88,8 +124,8 @@ static const char *nack_hint(void)
     return nack ? rl78_status_str(nack) : "目标无响应";
 }
 
-static esp_err_t erase_range(uint32_t start, uint32_t end_excl, uint32_t blksz,
-                             uint32_t pct_base, uint32_t pct_span)
+static esp_err_t rl78_erase_range(uint32_t start, uint32_t end_excl, uint32_t blksz,
+                                  uint32_t pct_base, uint32_t pct_span)
 {
     bool blank;
     uint32_t total = (end_excl - start + blksz - 1) / blksz;
@@ -112,6 +148,202 @@ static esp_err_t erase_range(uint32_t start, uint32_t end_excl, uint32_t blksz,
     }
     return s_prog.cancel ? ESP_ERR_INVALID_STATE : ESP_OK;
 }
+
+static esp_err_t rl78_job_flow(const prog_job_req_t *job, image_t *img,
+                               uint32_t img_min, uint32_t img_end, uint8_t *blk)
+{
+    const uint32_t blksz = CONFIG_PROG_FLASH_BLOCK_SIZE;
+    esp_err_t result;
+
+    /* erase-only: whole code flash */
+    if (job->erase && !job->program) {
+        set_prog_state(PROG_RUNNING, "全片擦除", NULL, 5);
+        prog_log("全片擦除 (%" PRIu32 " KB) ...", s_prog.dev_flash_kb);
+        result = rl78_erase_range(0, s_prog.sig.code_flash_end + 1, blksz, 5, 90);
+        if (result == ESP_OK) {
+            prog_log("擦除完成");
+        }
+        return result;
+    }
+
+    /* program */
+    if (job->program) {
+        uint32_t start = img_min & ~(blksz - 1);
+        uint32_t total = (img_end - start + blksz - 1) / blksz;
+        uint32_t done = 0;
+        uint32_t pct_span = job->verify ? 60 : 95;
+        set_prog_state(PROG_RUNNING, "编程", NULL, 5);
+        for (uint32_t addr = start; addr < img_end && !s_prog.cancel; addr += blksz) {
+            done++;
+            bool any = image_build_block(img, addr, blk, blksz);
+            set_prog_state(PROG_RUNNING, "编程", NULL, 5 + pct_span * done / total);
+            if (!any) {
+                continue;
+            }
+            bool blank;
+            result = rl78_block_blank_check(addr, blksz, &blank);
+            if (result != ESP_OK) {
+                prog_log("空白检查失败 @0x%06" PRIX32 ": %s", addr, nack_hint());
+                return result;
+            }
+            if (!blank) {
+                if (!job->erase) {
+                    prog_log("块 @0x%06" PRIX32 " 非空，且未勾选擦除，终止", addr);
+                    return ESP_ERR_INVALID_STATE;
+                }
+                result = rl78_block_erase(addr);
+                if (result != ESP_OK) {
+                    prog_log("擦除失败 @0x%06" PRIX32 ": %s", addr, nack_hint());
+                    return result;
+                }
+            }
+            result = rl78_program(addr, blk, blksz);
+            if (result != ESP_OK) {
+                prog_log("编程失败 @0x%06" PRIX32 ": %s", addr, nack_hint());
+                return result;
+            }
+        }
+        if (s_prog.cancel) {
+            return ESP_ERR_INVALID_STATE;
+        }
+        prog_log("编程完成 (%" PRIu32 " 块)", total);
+    }
+
+    /* verify */
+    if (job->verify) {
+        uint32_t start = img_min & ~(blksz - 1);
+        uint32_t total = (img_end - start + blksz - 1) / blksz;
+        uint32_t done = 0;
+        uint32_t pct_base = job->program ? 65 : 5;
+        set_prog_state(PROG_RUNNING, "校验", NULL, pct_base);
+        for (uint32_t addr = start; addr < img_end && !s_prog.cancel; addr += blksz) {
+            done++;
+            bool any = image_build_block(img, addr, blk, blksz);
+            set_prog_state(PROG_RUNNING, "校验", NULL, pct_base + (95 - pct_base) * done / total);
+            if (!any) {
+                continue;
+            }
+            result = rl78_verify(addr, blk, blksz);
+            if (result != ESP_OK) {
+                prog_log("校验失败 @0x%06" PRIX32 ": %s", addr, nack_hint());
+                return result;
+            }
+        }
+        if (s_prog.cancel) {
+            return ESP_ERR_INVALID_STATE;
+        }
+        prog_log("校验通过");
+    }
+    return ESP_OK;
+}
+
+/* ---------------- STM32 flow ---------------- */
+
+static esp_err_t stm32_job_flow(const prog_job_req_t *job, image_t *img,
+                                uint32_t img_min, uint32_t img_end)
+{
+    const stm32_info_t *s32 = &s_prog.s32;
+    esp_err_t result;
+
+    /* erase-only: mass erase */
+    if (job->erase && !job->program) {
+        set_prog_state(PROG_RUNNING, "全片擦除", NULL, 5);
+        prog_log("STM32 全片擦除 (%" PRIu32 " KB)，可能需要数十秒 ...", s32->flash_kb);
+        result = stm32_mass_erase(s32);
+        if (result == ESP_OK) {
+            prog_log("擦除完成");
+        } else {
+            prog_log("全片擦除失败");
+        }
+        return result;
+    }
+
+    /* effective address range: 0-based images are flashed at 0x08000000 */
+    uint32_t base = img_min >= STM32_FLASH_BASE ? 0 : STM32_FLASH_BASE;
+    uint32_t eff_min = base + img_min;
+    uint32_t eff_end = base + img_end;
+
+    /* count units in range for progress reporting */
+    uint32_t total = 0;
+    uint32_t u_addr = 0, u_size = 0;
+    for (uint32_t idx = 0; stm32_unit_bounds(s32, idx, &u_addr, &u_size); idx++) {
+        if (u_addr >= eff_end) break;
+        if (u_addr + u_size > eff_min) total++;
+    }
+    if (total == 0) total = 1;
+
+    uint8_t *buf = NULL;
+    uint32_t done = 0;
+
+    for (int pass = 0; pass < 2; pass++) {
+        bool do_program = (pass == 0) && job->program;
+        bool do_verify = (pass == 1) && job->verify;
+        if (!do_program && !do_verify) {
+            continue;
+        }
+        uint32_t pct_base = do_program ? 5 : (job->program ? 65 : 5);
+        uint32_t pct_span = do_program ? (job->verify ? 60 : 95) : (95 - pct_base);
+        set_prog_state(PROG_RUNNING, do_program ? "编程" : "校验", NULL, pct_base);
+
+        done = 0;
+        for (uint32_t idx = 0;
+             stm32_unit_bounds(s32, idx, &u_addr, &u_size) && !s_prog.cancel;
+             idx++) {
+            if (u_addr >= eff_end) break;
+            if (u_addr + u_size <= eff_min) continue;
+
+            if (u_size > 0 && !buf) {
+                buf = heap_caps_malloc(128 * 1024, MALLOC_CAP_SPIRAM);
+                if (!buf) {
+                    prog_log("内存不足");
+                    return ESP_ERR_NO_MEM;
+                }
+            }
+            /* build the unit image relative to the effective range */
+            bool any = image_build_block(img, u_addr - base, buf, u_size);
+            done++;
+            set_prog_state(PROG_RUNNING, do_program ? "编程" : "校验", NULL,
+                           pct_base + pct_span * done / total);
+            if (!any) {
+                continue;
+            }
+            /* trim trailing 0xFF to the largest program unit (8 bytes) */
+            uint32_t trim = u_size;
+            while (trim > 0 && buf[trim - 1] == 0xFF) trim--;
+            trim = (trim + 7) & ~7U;
+
+            if (do_program) {
+                if (job->erase) {
+                    result = stm32_erase_region(s32, u_addr, u_addr + u_size);
+                    if (result != ESP_OK) {
+                        prog_log("擦除失败 @0x%08" PRIX32, u_addr);
+                        return result;
+                    }
+                }
+                result = stm32_program(s32, u_addr, buf, trim);
+                if (result != ESP_OK) {
+                    prog_log("编程失败 @0x%08" PRIX32, u_addr);
+                    return result;
+                }
+            } else {
+                result = stm32_verify(s32, u_addr, buf, trim);
+                if (result != ESP_OK) {
+                    prog_log("校验失败 @0x%08" PRIX32, u_addr);
+                    return result;
+                }
+            }
+        }
+        if (s_prog.cancel) {
+            free(buf);
+            return ESP_ERR_INVALID_STATE;
+        }
+        prog_log("%s完成", do_program ? "编程" : "校验");
+    }
+    free(buf);
+    return ESP_OK;
+}
+
+/* ---------------- programming task ---------------- */
 
 static void program_task(void *arg)
 {
@@ -155,119 +387,38 @@ static void program_task(void *arg)
                  img_end > 0 ? img_end - 1 : 0);
     }
 
-    /* 2. enter programming mode and read the signature */
+    /* 2. detect the target (RL78 serial, then STM32 SWD) */
     set_prog_state(PROG_RUNNING, "连接目标", NULL, 2);
-    prog_log("进入目标编程模式 ...");
-    result = rl78_enter_programming_mode(&s_prog.sig);
+    prog_log("探测目标芯片 (RL78 -> STM32 SWD) ...");
+    result = detect_target();
     if (result != ESP_OK) {
-        prog_log("目标连接失败: %s。请检查接线与供电后重试。", nack_hint());
+        prog_log("目标连接失败，请检查接线与供电后重试。");
         goto out;
     }
-    s_prog.dev_valid = true;
-    {
-        uint32_t code_kb = (s_prog.sig.code_flash_end + 1) / 1024;
-        prog_log("目标芯片: %s, 设备编码 %02X%02X%02X, 代码闪存 %" PRIu32 " KB",
-                 s_prog.sig.device_name, s_prog.sig.device_code[0],
-                 s_prog.sig.device_code[1], s_prog.sig.device_code[2], code_kb);
+    if (s_prog.target == PROG_TARGET_RL78) {
+        prog_log("目标芯片: RL78 %s, 代码闪存 %" PRIu32 " KB",
+                 s_prog.dev_name, s_prog.dev_flash_kb);
+    } else {
+        prog_log("目标芯片: %s, DEV_ID 0x%03X, 闪存 %" PRIu32 " KB",
+                 s_prog.dev_name, s_prog.dev_id, s_prog.dev_flash_kb);
     }
 
-    if (job.program && s_prog.sig.code_flash_end &&
-        img_end - 1 > s_prog.sig.code_flash_end) {
-        prog_log("警告: 固件末尾 0x%06" PRIX32 " 超出代码闪存范围 0x%06" PRIX32,
-                 img_end - 1, s_prog.sig.code_flash_end);
-    }
-
-    blk = malloc(CONFIG_PROG_FLASH_BLOCK_SIZE);
-    if (!blk) {
-        prog_log("内存不足");
-        result = ESP_ERR_NO_MEM;
-        goto out;
-    }
-
-    /* 3. erase-only mode: erase the whole code flash */
-    if (job.erase && !job.program) {
-        set_prog_state(PROG_RUNNING, "全片擦除", NULL, 5);
-        prog_log("全片擦除 (%" PRIu32 " KB) ...", (s_prog.sig.code_flash_end + 1) / 1024);
-        result = erase_range(0, s_prog.sig.code_flash_end + 1,
-                             CONFIG_PROG_FLASH_BLOCK_SIZE, 5, 90);
-        if (result == ESP_OK) {
-            prog_log("擦除完成");
+    /* 3. run the target-specific flow */
+    if (s_prog.target == PROG_TARGET_STM32) {
+        if (s_prog.s32.style == STM32_STYLE_F4 &&
+            job.program && img_end - 1 > s_prog.s32.flash_kb * 1024) {
+            /* guard against out-of-flash images */
+            prog_log("警告: 固件超出闪存范围");
         }
-        goto out;
-    }
-
-    /* 4. program (with optional per-block erase) */
-    if (job.program) {
-        uint32_t blksz = CONFIG_PROG_FLASH_BLOCK_SIZE;
-        uint32_t start = img_min & ~(blksz - 1);
-        uint32_t total = (img_end - start + blksz - 1) / blksz;
-        uint32_t done = 0;
-        uint32_t pct_span = job.verify ? 60 : 95;
-        set_prog_state(PROG_RUNNING, "编程", NULL, 5);
-        for (uint32_t addr = start; addr < img_end && !s_prog.cancel; addr += blksz) {
-            done++;
-            bool any = image_build_block(&img, addr, blk, blksz);
-            set_prog_state(PROG_RUNNING, "编程", NULL, 5 + pct_span * done / total);
-            if (!any) {
-                continue;
-            }
-            bool blank;
-            result = rl78_block_blank_check(addr, blksz, &blank);
-            if (result != ESP_OK) {
-                prog_log("空白检查失败 @0x%06" PRIX32 ": %s", addr, nack_hint());
-                goto out;
-            }
-            if (!blank) {
-                if (!job.erase) {
-                    prog_log("块 @0x%06" PRIX32 " 非空，且未勾选擦除，终止", addr);
-                    result = ESP_ERR_INVALID_STATE;
-                    goto out;
-                }
-                result = rl78_block_erase(addr);
-                if (result != ESP_OK) {
-                    prog_log("擦除失败 @0x%06" PRIX32 ": %s", addr, nack_hint());
-                    goto out;
-                }
-            }
-            result = rl78_program(addr, blk, blksz);
-            if (result != ESP_OK) {
-                prog_log("编程失败 @0x%06" PRIX32 ": %s", addr, nack_hint());
-                goto out;
-            }
-        }
-        if (s_prog.cancel) {
-            result = ESP_ERR_INVALID_STATE;
+        result = stm32_job_flow(&job, &img, img_min, img_end);
+    } else {
+        blk = malloc(CONFIG_PROG_FLASH_BLOCK_SIZE);
+        if (!blk) {
+            prog_log("内存不足");
+            result = ESP_ERR_NO_MEM;
             goto out;
         }
-        prog_log("编程完成 (%" PRIu32 " 块)", total);
-    }
-
-    /* 5. verify */
-    if (job.verify) {
-        uint32_t blksz = CONFIG_PROG_FLASH_BLOCK_SIZE;
-        uint32_t start = img_min & ~(blksz - 1);
-        uint32_t total = (img_end - start + blksz - 1) / blksz;
-        uint32_t done = 0;
-        uint32_t pct_base = job.program ? 65 : 5;
-        set_prog_state(PROG_RUNNING, "校验", NULL, pct_base);
-        for (uint32_t addr = start; addr < img_end && !s_prog.cancel; addr += blksz) {
-            done++;
-            bool any = image_build_block(&img, addr, blk, blksz);
-            set_prog_state(PROG_RUNNING, "校验", NULL, pct_base + (95 - pct_base) * done / total);
-            if (!any) {
-                continue;
-            }
-            result = rl78_verify(addr, blk, blksz);
-            if (result != ESP_OK) {
-                prog_log("校验失败 @0x%06" PRIX32 ": %s", addr, nack_hint());
-                goto out;
-            }
-        }
-        if (s_prog.cancel) {
-            result = ESP_ERR_INVALID_STATE;
-            goto out;
-        }
-        prog_log("校验通过");
+        result = rl78_job_flow(&job, &img, img_min, img_end, blk);
     }
 
 out:
@@ -275,7 +426,14 @@ out:
     if (img_loaded) {
         image_free(&img);
     }
-    rl78_reset_target();
+    /* return the target to its application */
+    if (s_prog.dev_valid) {
+        if (s_prog.target == PROG_TARGET_STM32) {
+            stm32_reset_run(&s_prog.s32);
+        } else {
+            rl78_reset_target();
+        }
+    }
 
     bool cancelled = s_prog.cancel;
     if (result == ESP_OK) {
@@ -302,6 +460,7 @@ esp_err_t prog_job_init(void)
     s_prog.io_mu = xSemaphoreCreateMutex();
     configASSERT(s_prog.mu && s_prog.io_mu);
     s_prog.state = PROG_IDLE;
+    s_prog.target = PROG_TARGET_NONE;
     strlcpy(s_prog.stage, "空闲", sizeof(s_prog.stage));
     return ESP_OK;
 }
@@ -359,6 +518,10 @@ void prog_job_snapshot(prog_status_t *out)
     strlcpy(out->message, s_prog.message, sizeof(out->message));
     out->percent = s_prog.percent;
     out->dev_valid = s_prog.dev_valid;
+    out->target = s_prog.target;
+    strlcpy(out->dev_name, s_prog.dev_name, sizeof(out->dev_name));
+    out->dev_flash_kb = s_prog.dev_flash_kb;
+    out->dev_id = s_prog.dev_id;
     memcpy(&out->sig, &s_prog.sig, sizeof(out->sig));
     xSemaphoreGive(s_prog.mu);
 }
@@ -382,23 +545,22 @@ esp_err_t prog_job_connect(rl78_signature_t *sig)
         return ESP_ERR_INVALID_STATE;
     }
     xSemaphoreTake(s_prog.io_mu, portMAX_DELAY);
-    rl78_signature_t tmp;
-    esp_err_t err = rl78_enter_programming_mode(&tmp);
+    esp_err_t err = detect_target();
     xSemaphoreGive(s_prog.io_mu);
 
     if (err != ESP_OK) {
-        prog_log("连接目标失败: %s", nack_hint());
+        prog_log("目标连接失败");
         return err;
     }
-    xSemaphoreTake(s_prog.mu, portMAX_DELAY);
-    memcpy(&s_prog.sig, &tmp, sizeof(tmp));
-    s_prog.dev_valid = true;
-    xSemaphoreGive(s_prog.mu);
-
-    prog_log("目标芯片: %s (代码闪存 %" PRIu32 " KB)", tmp.device_name,
-             (tmp.code_flash_end + 1) / 1024);
-    if (sig) {
-        *sig = tmp;
+    if (s_prog.target == PROG_TARGET_RL78) {
+        prog_log("目标芯片: RL78 %s (代码闪存 %" PRIu32 " KB)",
+                 s_prog.dev_name, s_prog.dev_flash_kb);
+        if (sig) {
+            *sig = s_prog.sig;
+        }
+    } else {
+        prog_log("目标芯片: %s (DEV_ID 0x%03X, 闪存 %" PRIu32 " KB)",
+                 s_prog.dev_name, s_prog.dev_id, s_prog.dev_flash_kb);
     }
     return ESP_OK;
 }

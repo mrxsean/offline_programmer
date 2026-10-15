@@ -205,19 +205,28 @@ static esp_err_t delete_handler(httpd_req_t *req)
 
 /* ---------------- target / program API ---------------- */
 
-static void format_device_json(char *buf, size_t size, const rl78_signature_t *sig)
+static void format_device_json(char *buf, size_t size, const prog_status_t *snap)
 {
+    if (snap->target == PROG_TARGET_STM32) {
+        snprintf(buf, size,
+                 "\"name\":\"%s\",\"code\":\"%03X\","
+                 "\"code_size\":%" PRIu32 ",\"data_size\":0,"
+                 "\"version\":\"-\",\"target\":\"stm32\"",
+                 snap->dev_name, snap->dev_id,
+                 snap->dev_flash_kb * 1024);
+        return;
+    }
     uint32_t data_size = 0;
-    if (sig->data_flash_end >= 0xF1000) {
-        data_size = sig->data_flash_end - 0xF1000 + 1;
+    if (snap->sig.data_flash_end >= 0xF1000) {
+        data_size = snap->sig.data_flash_end - 0xF1000 + 1;
     }
     snprintf(buf, size,
              "\"name\":\"%s\",\"code\":\"%02X%02X%02X\","
              "\"code_size\":%" PRIu32 ",\"data_size\":%" PRIu32 ","
-             "\"version\":\"%X.%X%X\"",
-             sig->device_name, sig->device_code[0], sig->device_code[1], sig->device_code[2],
-             sig->code_flash_end + 1, data_size,
-             sig->fw_version[0], sig->fw_version[1], sig->fw_version[2]);
+             "\"version\":\"%X.%X%X\",\"target\":\"rl78\"",
+             snap->sig.device_name, snap->sig.device_code[0], snap->sig.device_code[1],
+             snap->sig.device_code[2], snap->sig.code_flash_end + 1, data_size,
+             snap->sig.fw_version[0], snap->sig.fw_version[1], snap->sig.fw_version[2]);
 }
 
 static esp_err_t connect_handler(httpd_req_t *req)
@@ -225,13 +234,14 @@ static esp_err_t connect_handler(httpd_req_t *req)
     if (prog_job_busy()) {
         return send_json_error(req, 500, "烧录进行中");
     }
-    rl78_signature_t sig;
-    esp_err_t err = prog_job_connect(&sig);
+    esp_err_t err = prog_job_connect(NULL);
     if (err != ESP_OK) {
         return send_json_error(req, 500, "目标无响应，请检查接线与供电");
     }
+    prog_status_t snap;
+    prog_job_snapshot(&snap);
     char dev[384];
-    format_device_json(dev, sizeof(dev), &sig);
+    format_device_json(dev, sizeof(dev), &snap);
     char resp[448];
     snprintf(resp, sizeof(resp), "{\"ok\":true,\"device\":{%s}}", dev);
     return send_json(req, resp);
@@ -429,7 +439,7 @@ static esp_err_t status_handler(httpd_req_t *req)
     esp_err_t err = httpd_resp_send_chunk(req, head, hl);
     if (err == ESP_OK && snap.dev_valid) {
         char dev[384];
-        format_device_json(dev, sizeof(dev), &snap.sig);
+        format_device_json(dev, sizeof(dev), &snap);
         char seg[416];
         int sl = snprintf(seg, sizeof(seg), "\"device\":{%s},", dev);
         err = httpd_resp_send_chunk(req, seg, sl);

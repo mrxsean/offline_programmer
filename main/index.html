@@ -259,7 +259,8 @@ async function connectTarget() {
     const d = await r.json();
     if (d.ok && d.device) {
       document.getElementById('devinfo').style.display = 'grid';
-      document.getElementById('devName').textContent = d.device.name;
+      const tname = d.device.target === 'stm32' ? '[STM32] ' : '[RL78] ';
+      document.getElementById('devName').textContent = tname + d.device.name;
       document.getElementById('devCode').textContent = d.device.code;
       document.getElementById('devCodeSize').textContent = fmtSize(d.device.code_size);
       document.getElementById('devDataSize').textContent = d.device.data_size ? fmtSize(d.device.data_size) : '无';

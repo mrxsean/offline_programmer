@@ -108,4 +108,16 @@ menu "Offline Programmer Configuration"
             default 37
     endmenu
 
+    menu "STM32 SWD Interface"
+        config PROG_SWD_CLK_GPIO
+            int "SWDCLK GPIO"
+            default 15
+        config PROG_SWD_DIO_GPIO
+            int "SWDIO GPIO"
+            default 16
+        config PROG_SWD_RST_GPIO
+            int "nRESET GPIO"
+            default 17
+    endmenu
+
 endmenu
