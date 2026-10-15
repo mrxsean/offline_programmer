@@ -11,8 +11,11 @@
 
 static const char *TAG = "swd";
 
-/* Half period of the SWD clock in microseconds (500 kHz). */
-#define SWD_HALF_PERIOD_US 1
+/* SWD clock half period in microseconds (runtime adjustable, 1 = 500 kHz).
+ * The connect sequence retries at slower speeds when the SWCLK line is
+ * filtered or loaded (e.g. an RL78 board sharing the same wires: its RESET
+ * pull-up + capacitor integrates a fast clock into a DC level). */
+static int s_half_us = 1;
 
 /* DP register addresses (byte address, bits [3:2] go into the request) */
 #define DP_DPIDR   0x0   /* read only */
@@ -42,9 +45,9 @@ static uint32_t s_idcode;
 static inline void swclk(void)
 {
     gpio_set_level(s_clk, 1);
-    esp_rom_delay_us(SWD_HALF_PERIOD_US);
+    esp_rom_delay_us(s_half_us);
     gpio_set_level(s_clk, 0);
-    esp_rom_delay_us(SWD_HALF_PERIOD_US);
+    esp_rom_delay_us(s_half_us);
 }
 
 static inline void dio_output(void)
@@ -69,10 +72,10 @@ static int swd_read_bit(void)
     /* SWD: the transmitter changes SWDIO on the falling edge and the
      * receiver samples on the rising edge -> sample with clock HIGH. */
     gpio_set_level(s_clk, 1);
-    esp_rom_delay_us(SWD_HALF_PERIOD_US);
+    esp_rom_delay_us(s_half_us);
     int b = gpio_get_level(s_dio);
     gpio_set_level(s_clk, 0);
-    esp_rom_delay_us(SWD_HALF_PERIOD_US);
+    esp_rom_delay_us(s_half_us);
     return b;
 }
 
@@ -290,16 +293,16 @@ static esp_err_t swd_connect_once(void)
     int clk_rb = 0, dio_fol = 0;
     for (int i = 0; i < 16; i++) {
         gpio_set_level(s_clk, 1);
-        esp_rom_delay_us(SWD_HALF_PERIOD_US);
+        esp_rom_delay_us(s_half_us);
         if (gpio_get_level(s_clk) == 1) clk_rb++;
         if (gpio_get_level(s_dio) == 1) dio_fol++;
         gpio_set_level(s_clk, 0);
-        esp_rom_delay_us(SWD_HALF_PERIOD_US);
+        esp_rom_delay_us(s_half_us);
         if (gpio_get_level(s_clk) == 0) clk_rb++;
         if (gpio_get_level(s_dio) == 0) dio_fol++;
     }
-    ESP_LOGI(TAG, "line selftest: clk_rb=%d/32 dio_follow=%d/32%s",
-             clk_rb, dio_fol,
+    ESP_LOGI(TAG, "line selftest@%dus: clk_rb=%d/32 dio_follow=%d/32%s",
+             s_half_us, clk_rb, dio_fol,
              dio_fol == 32 ? " [桥接测试通过]" :
              clk_rb == 32 ? " [CLK输出正常但SWDIO未跟随: 查短接线/PCB走线]" :
                             " [CLK输出异常: 引脚驱动问题]");
@@ -358,15 +361,31 @@ static esp_err_t swd_connect_once(void)
 
 esp_err_t swd_connect(void)
 {
+    /* Speed chain: start at the configured speed, then retry slower.
+     * A slow-only success indicates RC filtering / heavy load on the SWCLK
+     * line (RL78 board still attached, or series R/RC on the RESET net). */
+    const int speeds[] = { CONFIG_PROG_SWD_HALF_PERIOD_US, 20, 200 };
     esp_err_t err = ESP_FAIL;
-    for (int attempt = 1; attempt <= 3; attempt++) {
-        err = swd_connect_once();
-        if (err == ESP_OK) {
-            return ESP_OK;
+
+    for (size_t i = 0; i < sizeof(speeds) / sizeof(speeds[0]); i++) {
+        s_half_us = speeds[i];
+        ESP_LOGI(TAG, "SWD speed: half period %d us (%d Hz)",
+                 s_half_us, 500000 / s_half_us);
+        int attempts = (i == 0) ? 3 : 2;
+        for (int attempt = 1; attempt <= attempts; attempt++) {
+            err = swd_connect_once();
+            if (err == ESP_OK) {
+                if (i > 0) {
+                    ESP_LOGW(TAG, "SWD 仅在低速下连通：SWCLK 线路有滤波/负载"
+                             "（RL78 板仍并接同一组线？PCB 上 RESET 网络有 RC？）");
+                }
+                return ESP_OK;   /* s_half_us stays slow for this session */
+            }
+            ESP_LOGW(TAG, "swd connect attempt %d failed", attempt);
+            vTaskDelay(pdMS_TO_TICKS(20));
         }
-        ESP_LOGW(TAG, "swd connect attempt %d failed", attempt);
-        vTaskDelay(pdMS_TO_TICKS(20));
     }
+
     /* troubleshooting aid: 2 Hz square wave on SWCLK for 10 s so the user can
      * check the wire with a multimeter (swinging ~1.65V) or an LED */
     ESP_LOGW(TAG, "SWCLK 输出 2Hz 方波 10 秒，可用万用表测编程器 SWCLK 线");

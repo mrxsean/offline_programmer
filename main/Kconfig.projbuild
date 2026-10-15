@@ -121,6 +121,14 @@ menu "Offline Programmer Configuration"
             help
                 Optional target reset line. Set to -1 to disable; software
                 reset-halt (AIRCR.SYSRESETREQ) is used instead.
+        config PROG_SWD_HALF_PERIOD_US
+            int "SWD clock half period (us)"
+            default 1
+            range 1 10000
+            help
+                SWD clock half period in microseconds (1 = 500 kHz). The
+                connect sequence automatically retries at 20us / 200us when
+                the faster clock fails (filtered or loaded SWCLK line).
     endmenu
 
 endmenu
