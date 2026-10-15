@@ -111,13 +111,16 @@ menu "Offline Programmer Configuration"
     menu "STM32 SWD Interface"
         config PROG_SWD_CLK_GPIO
             int "SWDCLK GPIO"
-            default 15
+            default 43
         config PROG_SWD_DIO_GPIO
             int "SWDIO GPIO"
-            default 16
+            default 44
         config PROG_SWD_RST_GPIO
-            int "nRESET GPIO"
-            default 17
+            int "nRESET GPIO (-1 = disabled)"
+            default -1
+            help
+                Optional target reset line. Set to -1 to disable; software
+                reset-halt (AIRCR.SYSRESETREQ) is used instead.
     endmenu
 
 endmenu

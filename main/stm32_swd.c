@@ -55,6 +55,7 @@ static inline void dio_output(void)
 static inline void dio_input(void)
 {
     gpio_set_direction(s_dio, GPIO_MODE_INPUT);
+    gpio_set_pull_mode(s_dio, GPIO_PULLUP_ONLY);   /* SWDIO needs a pull-up while undriven */
 }
 
 static void swd_write_bit(int b)
@@ -233,13 +234,18 @@ void swd_host_init(void)
     dio_output();
     gpio_set_level(s_dio, 0);
 
-    gpio_reset_pin(s_rst);
-    gpio_set_direction(s_rst, GPIO_MODE_OUTPUT);
-    gpio_set_level(s_rst, 1);   /* idle: target running */
+    if (s_rst >= 0) {
+        gpio_reset_pin(s_rst);
+        gpio_set_direction(s_rst, GPIO_MODE_OUTPUT);
+        gpio_set_level(s_rst, 1);   /* idle: target running */
+    }
 }
 
 void swd_target_reset(bool assert)
 {
+    if (s_rst < 0) {
+        return;   /* reset line disabled: software reset-halt is used instead */
+    }
     gpio_set_level(s_rst, assert ? 0 : 1);
 }
 
@@ -252,7 +258,14 @@ esp_err_t swd_connect(void)
 {
     s_idcode = 0;
 
-    /* connect-under-reset: hold the target in reset while attaching */
+    /* The RL78 TX pin (TOOL0) may share the SWDIO harness through a series
+     * resistor. Its UART driver idles push-pull high and would fight the
+     * line, so release it to a hi-Z input while SWD is active. It is
+     * re-claimed automatically the next time RL78 mode is entered. */
+    gpio_reset_pin(CONFIG_PROG_TOOL0_TX_GPIO);
+
+    /* connect-under-reset: hold the target in reset while attaching
+     * (no-op when the reset line is disabled) */
     swd_target_reset(true);
     vTaskDelay(pdMS_TO_TICKS(2));
 

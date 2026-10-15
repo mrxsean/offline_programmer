@@ -40,17 +40,20 @@ HTTP 服务，通过浏览器即可完成固件文件的上传、管理与目标
   **USB Serial/JTAG**（GPIO19/20 的 USB 口），烧录/调试请使用该 USB 口；
   用 UART0 口烧录固件不受影响（esptool 直接使用 ROM 引导）。
 
-### STM32 目标（SWD）
+### STM32 目标（SWD，与 RL78 共用引脚）
 
-| ESP32-S3 引脚 | 连接目标 STM32 | 说明 |
-| --- | --- | --- |
-| GPIO15 | SWDCLK（PA14） | 时钟，推挽输出 |
-| GPIO16 | SWDIO（PA13） | 双向数据线 |
-| GPIO17 | nRESET（NRST） | 连接后复位进入调试（connect-under-reset），即使 PA13/PA14 被目标程序占用也能烧写 |
-| GND | GND | 共地必须连接 |
+| ESP32-S3 引脚 | RL78 功能 | STM32 功能 | 说明 |
+| --- | --- | --- | --- |
+| GPIO44 | TOOL0_RX | SWDIO（PA13） | 双向数据线，启用内部上拉 |
+| GPIO43 | RESET | SWDCLK（PA14） | 时钟，推挽输出 |
+| GPIO42 | TOOL0_TX（经 1K） | （SWD 时释放为高阻） | 转接线可与 SWDIO 并接，软件自动释放 |
+| GND | GND | GND | 共地必须连接 |
 
+- 默认**不接 nRESET**：改用软件复位停机（AIRCR.SYSRESETREQ + VC_CORERESET）。
+  若目标程序把 PA13/PA14 配置为 GPIO 并驱动，需手动复位目标板后再连接；
+  需要硬件复位线时可在 menuconfig 中给 `PROG_SWD_RST_GPIO` 指定引脚（默认 -1 禁用）。
 - SWD 时钟约 500kHz（位带实现），F1/F4 的 Flash 编程时间远大于通信时间，无需更高速度。
-- 烧写流程：复位下连接 → 停机 → 识别 DBGMCU DEV_ID 与闪存容量 → 解锁 →
+- 烧写流程：连接 →（软件）复位停机 → 识别 DBGMCU DEV_ID 与闪存容量 → 解锁 →
   按页/扇区擦除 → 编程 → 校验 → 复位运行。
 - 2MB 双 Bank 的 F4（F427/429/437/439）暂按首个 1MB Bank 支持。
 
