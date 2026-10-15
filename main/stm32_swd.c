@@ -86,11 +86,13 @@ static void swd_line_reset(void)
     }
 }
 
-/* JTAG -> SWD select sequence: 0x79E7 sent LSB first */
+/* JTAG -> SWD select sequence.
+ * ARM ADIv5: the 16-bit sequence 0b0111100111100111 is transmitted MSB first,
+ * i.e. 0x79E7 MSB-first == 0xE79E LSB-first. Do NOT send 0x79E7 LSB first. */
 static void swd_jtag_to_swd(void)
 {
     dio_output();
-    for (int i = 0; i < 16; i++) {
+    for (int i = 15; i >= 0; i--) {
         swd_write_bit((0x79E7 >> i) & 1);
     }
 }
