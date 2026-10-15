@@ -284,6 +284,21 @@ static esp_err_t swd_connect_once(void)
     ESP_LOGI(TAG, "link idle: SWDIO=%d%s (expect 1)", idle_lvl,
              idle_lvl ? "" : " <-- 线路被拉低，检查接线/短路");
 
+    /* Line self-test: drive SWCLK and count how often SWDIO follows it.
+     * 32/32 -> SWDIO bridged to SWCLK (user test) and both host pins work;
+     * 16/32 -> SWDIO pulled high, not following (not bridged, or CLK line dead).
+     * Safe: 16 clocks with SWDIO high just park a JTAG TAP in Test-Logic-Reset. */
+    int follow = 0;
+    for (int i = 0; i < 16; i++) {
+        gpio_set_level(s_clk, 1);
+        esp_rom_delay_us(SWD_HALF_PERIOD_US);
+        if (gpio_get_level(s_dio) == 1) follow++;
+        gpio_set_level(s_clk, 0);
+        esp_rom_delay_us(SWD_HALF_PERIOD_US);
+        if (gpio_get_level(s_dio) == 0) follow++;
+    }
+    ESP_LOGI(TAG, "line selftest: %d/32 (32=桥接测试通过; 16=SWDIO未跟随CLK)", follow);
+
     /* connect-under-reset: hold the target in reset while attaching
      * (no-op when the reset line is disabled) */
     swd_target_reset(true);
