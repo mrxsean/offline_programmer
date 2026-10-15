@@ -240,7 +240,7 @@ void swd_host_init(void)
     s_rst = CONFIG_PROG_SWD_RST_GPIO;
 
     gpio_reset_pin(s_clk);
-    gpio_set_direction(s_clk, GPIO_MODE_OUTPUT);
+    gpio_set_direction(s_clk, GPIO_MODE_INPUT_OUTPUT);   /* readback-capable */
     gpio_set_level(s_clk, 0);
 
     gpio_reset_pin(s_dio);
@@ -284,20 +284,25 @@ static esp_err_t swd_connect_once(void)
     ESP_LOGI(TAG, "link idle: SWDIO=%d%s (expect 1)", idle_lvl,
              idle_lvl ? "" : " <-- 线路被拉低，检查接线/短路");
 
-    /* Line self-test: drive SWCLK and count how often SWDIO follows it.
-     * 32/32 -> SWDIO bridged to SWCLK (user test) and both host pins work;
-     * 16/32 -> SWDIO pulled high, not following (not bridged, or CLK line dead).
-     * Safe: 16 clocks with SWDIO high just park a JTAG TAP in Test-Logic-Reset. */
-    int follow = 0;
+    /* Line self-test: toggle SWCLK, count pad readback (clk_rb) and how often
+     * SWDIO follows (dio_fol). Requires the user to bridge SWDIO<->SWCLK for
+     * a full pass. Safe: clocks with SWDIO high park a JTAG TAP in TLR. */
+    int clk_rb = 0, dio_fol = 0;
     for (int i = 0; i < 16; i++) {
         gpio_set_level(s_clk, 1);
         esp_rom_delay_us(SWD_HALF_PERIOD_US);
-        if (gpio_get_level(s_dio) == 1) follow++;
+        if (gpio_get_level(s_clk) == 1) clk_rb++;
+        if (gpio_get_level(s_dio) == 1) dio_fol++;
         gpio_set_level(s_clk, 0);
         esp_rom_delay_us(SWD_HALF_PERIOD_US);
-        if (gpio_get_level(s_dio) == 0) follow++;
+        if (gpio_get_level(s_clk) == 0) clk_rb++;
+        if (gpio_get_level(s_dio) == 0) dio_fol++;
     }
-    ESP_LOGI(TAG, "line selftest: %d/32 (32=桥接测试通过; 16=SWDIO未跟随CLK)", follow);
+    ESP_LOGI(TAG, "line selftest: clk_rb=%d/32 dio_follow=%d/32%s",
+             clk_rb, dio_fol,
+             dio_fol == 32 ? " [桥接测试通过]" :
+             clk_rb == 32 ? " [CLK输出正常但SWDIO未跟随: 查短接线/PCB走线]" :
+                            " [CLK输出异常: 引脚驱动问题]");
 
     /* connect-under-reset: hold the target in reset while attaching
      * (no-op when the reset line is disabled) */
@@ -361,6 +366,15 @@ esp_err_t swd_connect(void)
         }
         ESP_LOGW(TAG, "swd connect attempt %d failed", attempt);
         vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    /* troubleshooting aid: 2 Hz square wave on SWCLK for 10 s so the user can
+     * check the wire with a multimeter (swinging ~1.65V) or an LED */
+    ESP_LOGW(TAG, "SWCLK 输出 2Hz 方波 10 秒，可用万用表测编程器 SWCLK 线");
+    for (int i = 0; i < 20; i++) {
+        gpio_set_level(s_clk, 1);
+        vTaskDelay(pdMS_TO_TICKS(250));
+        gpio_set_level(s_clk, 0);
+        vTaskDelay(pdMS_TO_TICKS(250));
     }
     return err;
 }
