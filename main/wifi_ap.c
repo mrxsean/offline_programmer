@@ -54,6 +54,8 @@ esp_err_t wifi_ap_init(void)
     ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_AP), TAG, "set mode failed");
     ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg), TAG, "set config failed");
     ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "wifi start failed");
+    /* TX power is in 0.25 dBm units: 34 = 8.5 dBm. Must be set after Wi-Fi starts. */
+//    ESP_RETURN_ON_ERROR(esp_wifi_set_max_tx_power(34), TAG, "set tx power failed");
     esp_wifi_set_ps(WIFI_PS_NONE);
 
     esp_netif_ip_info_t ip;

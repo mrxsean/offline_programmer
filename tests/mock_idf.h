@@ -89,6 +89,7 @@ typedef struct { int dev_addr_length, device_address, scl_speed_hz; } i2c_device
 #define I2C_ADDR_BIT_LEN_7 0
 esp_err_t i2c_master_transmit(i2c_master_dev_handle_t, const uint8_t *, size_t, int);
 esp_err_t i2c_new_master_bus(const i2c_master_bus_config_t *, i2c_master_bus_handle_t *);
+esp_err_t i2c_master_bus_reset(i2c_master_bus_handle_t);
 esp_err_t i2c_master_probe(i2c_master_bus_handle_t, uint16_t, int);
 esp_err_t i2c_del_master_bus(i2c_master_bus_handle_t);
 esp_err_t i2c_master_bus_add_device(i2c_master_bus_handle_t, const i2c_device_config_t *, i2c_master_dev_handle_t *);

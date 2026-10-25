@@ -18,6 +18,12 @@
 #define OLED_WIDTH     72
 #define OLED_PAGES     5
 #define OLED_COLUMN    28
+#define OLED_CHAR_WIDTH       6
+#define OLED_REFRESH_MS       100
+#define OLED_SCROLL_PAUSE_MS  1000
+#define OLED_SCROLL_STEP      2
+#define OLED_SCROLL_GAP_CHARS 3
+#define OLED_RETRY_MS         1000
 
 #define PANEL_PIN(pin) ((pin) == LED_GPIO || (pin) == BUTTON_GPIO || \
                         (pin) == OLED_SDA_GPIO || (pin) == OLED_SCL_GPIO)
@@ -26,7 +32,10 @@ _Static_assert(!PANEL_PIN(CONFIG_PROG_TOOL0_TX_GPIO) &&
                !PANEL_PIN(CONFIG_PROG_RESET_GPIO), "Target GPIO conflicts with front panel");
 
 static const char *TAG = "panel";
+static i2c_master_bus_handle_t s_oled_bus;
 static i2c_master_dev_handle_t s_oled;
+static bool s_oled_ready;
+static TickType_t s_oled_refreshed;
 static uint8_t s_frame[1 + OLED_WIDTH * OLED_PAGES];
 
 /* Five columns, bit 0 at the top. Only filename characters and UI glyphs. */
@@ -68,10 +77,25 @@ static const uint8_t font_lower[26][5] = {
     {0x0c,0x50,0x50,0x50,0x3c}, {0x44,0x64,0x54,0x4c,0x44},
 };
 
-static void draw_text(unsigned page, const char *text, size_t len)
+static void draw_text(unsigned page, const char *text, TickType_t elapsed)
 {
-    for (size_t i = 0; i < len && i < 12 && text[i]; i++) {
-        unsigned char c = text[i];
+    size_t len = strlen(text);
+    size_t cycle_chars = len + OLED_SCROLL_GAP_CHARS;
+    size_t offset = 0;
+    bool scrolling = len * OLED_CHAR_WIDTH > OLED_WIDTH;
+    if (scrolling) {
+        TickType_t pause = pdMS_TO_TICKS(OLED_SCROLL_PAUSE_MS);
+        TickType_t step_ticks = pdMS_TO_TICKS(OLED_REFRESH_MS);
+        TickType_t cycle_ticks = pause +
+            cycle_chars * OLED_CHAR_WIDTH / OLED_SCROLL_STEP * step_ticks;
+        TickType_t phase = elapsed % cycle_ticks;
+        if (phase > pause) offset = (phase - pause) / step_ticks * OLED_SCROLL_STEP;
+    }
+    int x = -(int)(offset % OLED_CHAR_WIDTH);
+    for (size_t i = offset / OLED_CHAR_WIDTH; x < OLED_WIDTH; i++, x += OLED_CHAR_WIDTH) {
+        size_t index = scrolling ? i % cycle_chars : i;
+        if (index >= len) continue;
+        unsigned char c = text[index];
         uint8_t glyph[5] = {0};
         const uint8_t *bits = glyph;
         if (c >= '0' && c <= '9') bits = font_digits[c - '0'];
@@ -84,21 +108,25 @@ static void draw_text(unsigned page, const char *text, size_t len)
             glyph[0] = 0x63; glyph[1] = 0x13; glyph[2] = 0x08;
             glyph[3] = 0x64; glyph[4] = 0x63;
         }
-        memcpy(&s_frame[1 + page * OLED_WIDTH + i * 6], bits, 5);
+        /* Clip both edges so partially visible glyphs stay on this row. */
+        for (int col = 0; col < 5; col++) {
+            int pixel = x + col;
+            if (pixel >= 0 && pixel < OLED_WIDTH) {
+                s_frame[1 + page * OLED_WIDTH + pixel] = bits[col];
+            }
+        }
     }
 }
 
-static void render_status(const prog_status_t *status, unsigned name_page)
+static void render_status(const prog_status_t *status, TickType_t elapsed)
 {
     memset(s_frame, 0, sizeof(s_frame));
     s_frame[0] = 0x40;
     size_t len = strlen(status->file);
     if (len) {
-        size_t offset = (name_page % ((len + 23) / 24)) * 24;
-        draw_text(0, status->file + offset, 12);
-        if (len - offset > 12) draw_text(1, status->file + offset + 12, 12);
+        draw_text(0, status->file, elapsed);
     } else {
-        draw_text(0, "NO FILE", 12);
+        draw_text(0, "NO FILE", elapsed);
     }
     const char *label = "READY";
     const char *hint = len ? "PRESS KEY" : "SELECT WEB";
@@ -122,8 +150,8 @@ static void render_status(const prog_status_t *status, unsigned name_page)
     } else if (status->cancelled) {
         label = "CANCELLED";
     }
-    draw_text(2, label, 12);
-    draw_text(3, hint, 12);
+    draw_text(2, label, elapsed);
+    draw_text(3, hint, elapsed);
     if (status->state == PROG_RUNNING || status->state == PROG_DONE) {
         unsigned fill = pct * (OLED_WIDTH - 2) / 100;
         for (unsigned x = 0; x < OLED_WIDTH; x++) {
@@ -142,60 +170,71 @@ static esp_err_t oled_flush(void)
     return err;
 }
 
-static esp_err_t oled_init(void)
+static esp_err_t oled_init(const prog_status_t *status, TickType_t elapsed)
 {
-    i2c_master_bus_handle_t bus;
-    i2c_master_bus_config_t bus_config = {
-        .i2c_port = I2C_NUM_0,
-        .sda_io_num = OLED_SDA_GPIO,
-        .scl_io_num = OLED_SCL_GPIO,
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .glitch_ignore_cnt = 7,
-        .flags.enable_internal_pullup = true,
-    };
-    ESP_RETURN_ON_ERROR(i2c_new_master_bus(&bus_config, &bus), TAG, "I2C init");
-    unsigned addr;
-    for (addr = 0x3c; addr <= 0x3d; addr++) {
-        if (i2c_master_probe(bus, addr, 50) == ESP_OK) break;
-    }
-    if (addr > 0x3d) {
-        i2c_del_master_bus(bus);
-        return ESP_ERR_NOT_FOUND;
-    }
-    i2c_device_config_t config = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address = addr,
-        .scl_speed_hz = 100000,
-    };
-    esp_err_t err = i2c_master_bus_add_device(bus, &config, &s_oled);
-    if (err == ESP_OK) {
-        /* SSD1315: 40 COM lines, internal IREF/charge pump, columns 28..99. */
-        const uint8_t init[] = {
-            0x00, 0xae, 0xd5, 0x80, 0xa8, 0x27, 0xd3, 0x00,
-            0x40, 0xad, 0x30, 0x8d, 0x14, 0x20, 0x00, 0xa1,
-            0xc8, 0xda, 0x12, 0x81, 0x7f, 0xd9, 0x22, 0xdb, 0x20,
-            0xa4, 0xa6, 0x2e,
+    if (!s_oled_bus) {
+        i2c_master_bus_config_t bus_config = {
+            .i2c_port = I2C_NUM_0,
+            .sda_io_num = OLED_SDA_GPIO,
+            .scl_io_num = OLED_SCL_GPIO,
+            .clk_source = I2C_CLK_SRC_DEFAULT,
+            .glitch_ignore_cnt = 7,
+            .flags.enable_internal_pullup = true,
         };
-        err = i2c_master_transmit(s_oled, init, sizeof(init), 50);
-        if (err == ESP_OK) {
-            prog_status_t status;
-            programmer_get_status(&status);
-            render_status(&status, 0);
-            err = oled_flush();
-        }
-        if (err == ESP_OK) {
-            const uint8_t on[] = {0x00, 0xaf};
-            err = i2c_master_transmit(s_oled, on, sizeof(on), 50);
-        }
+        ESP_RETURN_ON_ERROR(i2c_new_master_bus(&bus_config, &s_oled_bus), TAG, "I2C init");
     }
-    if (err != ESP_OK) {
-        if (s_oled) i2c_master_bus_rm_device(s_oled);
-        s_oled = NULL;
-        i2c_del_master_bus(bus);
-    } else {
+    /* The OLED stays powered when the ESP32 resets, possibly mid-transfer. */
+    ESP_RETURN_ON_ERROR(i2c_master_bus_reset(s_oled_bus), TAG, "I2C recovery");
+    if (!s_oled) {
+        unsigned addr;
+        for (addr = 0x3c; addr <= 0x3d; addr++) {
+            esp_err_t err = i2c_master_probe(s_oled_bus, addr, 50);
+            if (err == ESP_OK) break;
+            if (err != ESP_ERR_NOT_FOUND) return err;
+        }
+        if (addr > 0x3d) return ESP_ERR_NOT_FOUND;
+        i2c_device_config_t config = {
+            .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+            .device_address = addr,
+            .scl_speed_hz = 100000,
+        };
+        ESP_RETURN_ON_ERROR(i2c_master_bus_add_device(s_oled_bus, &config, &s_oled),
+                            TAG, "OLED device");
         ESP_LOGI(TAG, "SSD1315 72x40 at 0x%02x", addr);
     }
-    return err;
+    /* Drain parameters left pending when the MCU reset mid-command. */
+    const uint8_t sync[] = {0x00, 0xe3, 0xe3, 0xe3, 0xe3, 0xe3, 0xe3, 0xe3, 0xe3};
+    ESP_RETURN_ON_ERROR(i2c_master_transmit(s_oled, sync, sizeof(sync), 50), TAG, "OLED sync");
+    /* SSD1315: 40 COM lines, internal IREF/charge pump, columns 28..99. */
+    const uint8_t init[] = {
+        0x00, 0xae, 0x2e, 0xd5, 0x80, 0xa8, 0x27, 0xd3, 0x00,
+        0x40, 0xad, 0x30, 0x8d, 0x14, 0x20, 0x00, 0xa1,
+        0xc8, 0xda, 0x12, 0x81, 0x7f, 0xd9, 0x22, 0xdb, 0x20,
+        0xa4, 0xa6, 0x23, 0x00,
+    };
+    ESP_RETURN_ON_ERROR(i2c_master_transmit(s_oled, init, sizeof(init), 50), TAG, "OLED setup");
+    render_status(status, elapsed);
+    ESP_RETURN_ON_ERROR(oled_flush(), TAG, "OLED redraw");
+    const uint8_t on[] = {0x00, 0xaf};
+    return i2c_master_transmit(s_oled, on, sizeof(on), 50);
+}
+
+static void oled_update(const prog_status_t *status, TickType_t elapsed, TickType_t now)
+{
+    unsigned interval_ms = s_oled_ready ? OLED_REFRESH_MS : OLED_RETRY_MS;
+    if (now - s_oled_refreshed < pdMS_TO_TICKS(interval_ms)) return;
+    s_oled_refreshed = now;
+    if (!s_oled_ready) {
+        s_oled_ready = oled_init(status, elapsed) == ESP_OK;
+        if (s_oled_ready) ESP_LOGI(TAG, "OLED recovered");
+        return;
+    }
+    render_status(status, elapsed);
+    esp_err_t err = oled_flush();
+    if (err != ESP_OK) {
+        s_oled_ready = false;
+        ESP_LOGW(TAG, "OLED refresh failed: %s; retrying in %dms", esp_err_to_name(err), OLED_RETRY_MS);
+    }
 }
 
 typedef struct {
@@ -237,12 +276,10 @@ static void panel_task(void *arg)
 {
     /* Require a debounced release after boot, including when held at power-on. */
     button_t button = {.raw_pressed = true, .pressed = true};
-    TickType_t refreshed = xTaskGetTickCount();
-    TickType_t state_since = refreshed;
-    TickType_t name_since = refreshed;
+    TickType_t state_since = xTaskGetTickCount();
+    TickType_t name_since = state_since;
     prog_state_t previous = PROG_IDLE;
     char previous_file[STORAGE_MAX_NAME] = "";
-    bool display_ok = s_oled != NULL;
     while (true) {
         TickType_t now = xTaskGetTickCount();
         prog_status_t status;
@@ -262,15 +299,7 @@ static void panel_task(void *arg)
             strlcpy(previous_file, status.file, sizeof(previous_file));
             name_since = now;
         }
-        if (display_ok && now - refreshed >= pdMS_TO_TICKS(200)) {
-            render_status(&status, (now - name_since) / pdMS_TO_TICKS(2000));
-            esp_err_t err = oled_flush();
-            if (err != ESP_OK) {
-                ESP_LOGW(TAG, "OLED update stopped: %s", esp_err_to_name(err));
-                display_ok = false;
-            }
-            refreshed = now;
-        }
+        oled_update(&status, now - name_since, now);
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
@@ -287,7 +316,12 @@ esp_err_t front_panel_init(void)
     config.mode = GPIO_MODE_INPUT;
     config.pull_up_en = GPIO_PULLUP_ENABLE;
     ESP_RETURN_ON_ERROR(gpio_config(&config), TAG, "button init");
-    esp_err_t err = oled_init();
+    vTaskDelay(pdMS_TO_TICKS(100));
+    prog_status_t status;
+    programmer_get_status(&status);
+    esp_err_t err = oled_init(&status, 0);
+    s_oled_ready = err == ESP_OK;
+    s_oled_refreshed = xTaskGetTickCount();
     if (err != ESP_OK) ESP_LOGW(TAG, "OLED unavailable: %s; button/LED remain active", esp_err_to_name(err));
     return xTaskCreate(panel_task, "front_panel", 3072, NULL, 3, NULL) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
 }

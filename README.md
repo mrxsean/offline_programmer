@@ -91,9 +91,12 @@ idf.py -p /dev/ttyUSB0 flash monitor
 | 失败 | 快闪（亮/灭各 125ms） | `FAILED` / `CHECK LOG`，详情查看网页日志 |
 | 取消 | 熄灭 | `CANCELLED` |
 
-OLED 使用大小写英文字母、数字及文件名符号，每行 12 字符；前两行显示固件名，
-超过 24 字符时每 2 秒翻页，可显示完整文件名。结果保持到下次启动或重新选择固件。
-OLED 未连接或通信失败不会阻止按键烧录和 LED 指示；显示通信失败后停止刷新并记录日志，恢复接线后重启。
+OLED 使用大小写英文字母、数字及文件名符号，每行可容纳 12 字符；固件名单行显示，
+超过屏幕宽度时沿 X 轴向左循环滚动，不换行。每 100ms 移动 2 像素，循环间留 3 字符空白，
+每次回到开头时停留约 1 秒；切换固件后从开头显示，短文件名保持静止。
+状态、百分比和进度条保持原位，结果保持到下次启动或重新选择固件。
+OLED 启动时先清理 I2C 总线，再同步命令并重新初始化、重画屏幕，处理 ESP32-C3 手动复位而 OLED 仍通电的情况。
+OLED 未连接或通信失败不会阻止按键烧录和 LED 指示；初始化或刷新失败后每约 1 秒重试，通信恢复后自动重画并继续刷新。
 显示窗口采用列 28～99、5 页，参考 [M5Stack 72×40 SSD1315 面板配置](https://github.com/m5stack/M5GFX/blob/master/src/M5UnitMiniOLED.h)
 及 [SSD1315 数据手册](https://files.seeedstudio.com/wiki/Grove-OLED-Yellow%26Blue-Display-0.96-%28SSD1315%29_V1.0/res/SSD1315.pdf)。
 
@@ -124,11 +127,11 @@ git diff --check
 ```
 
 主机测试编译实际 C 源码，模拟 NVS、任务调度、HTTP 和目标芯片，覆盖选择恢复、保存失败、
-非法/缺失文件、忙时互斥、完整任务及错误/取消、按键消抖/长按、LED 极性、文件名翻页及 I2C 显示范围。
+非法/缺失文件、忙时互斥、完整任务及错误/取消、按键消抖/长按、LED 极性、文件名横向滚动、I2C 显示范围及 OLED 失败恢复。
 启用 AddressSanitizer / UndefinedBehaviorSanitizer；若在 ptrace 沙箱中运行而 LeakSanitizer 不可用，
 使用 `ASAN_OPTIONS=detect_leaks=0 python3 tests/run_host_tests.py`（保留地址和未定义行为检查）。
 
-主机测试和编译不能代替实板验收：需检查断电后选择恢复、OLED 方向/窗口、按键单次触发，
+主机测试和编译不能代替实板验收：需检查断电后选择恢复、OLED 方向/窗口、ESP32-C3 连续手动复位后的显示恢复、按键单次触发，
 并接真实 RL78 验证成功、断线失败和网页取消时的显示及 LED。
 
 ## 注意事项
