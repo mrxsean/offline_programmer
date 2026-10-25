@@ -22,7 +22,7 @@
   "idf.openOcdConfigs": [
     "board/esp32c3-builtin.cfg"
   ],
-  "idf.port": "/dev/ttyACM0",
+  "idf.port": "/dev/tty.usbmodem101",
   "idf.currentSetup": "/home/sean/.espressif/release-v5.5/esp-idf",
   "idf.customExtraVars": {
     "OPENOCD_SCRIPTS": "/home/sean/esp/.espressif/tools/openocd-esp32/v0.12.0-esp32-20240318/openocd-esp32/share/openocd/scripts",
@@ -34,5 +34,6 @@
     "--background-index",
     "--query-driver=**",
     "--compile-commands-dir=/home/sean/work/esp32/offline_programmer/build"
-  ]
+  ],
+  "idf.flashType": "UART"
 }

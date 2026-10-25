@@ -116,6 +116,7 @@ void programmer_get_status(prog_status_t *status)
     strlcpy(status->file, s_prog.file, sizeof(status->file));
     strlcpy(status->stage, s_prog.stage, sizeof(status->stage));
     status->cancelled = s_prog.cancelled;
+    strlcpy(status->chip, s_prog.dev_valid ? s_prog.sig.device_name : "", sizeof(status->chip));
     xSemaphoreGive(s_prog.mu);
 }
 
@@ -569,15 +570,10 @@ static esp_err_t delete_handler(httpd_req_t *req)
     return err;
 }
 
-static esp_err_t select_handler(httpd_req_t *req)
+/* Caller holds both io_mu and mu, as for HTTP selection. */
+static esp_err_t select_file_locked(const char *name)
 {
-    char name[STORAGE_MAX_NAME];
-    if (!get_query_param(req, "file", name, sizeof(name)) || !storage_name_valid(name)) {
-        return send_json_error(req, 400, "文件名无效");
-    }
-    if (!try_idle_io()) return send_json_error(req, 500, "设备忙，请稍后重试");
     esp_err_t err = ESP_OK;
-    xSemaphoreTake(s_prog.mu, portMAX_DELAY);
     if (!storage_exists(name)) {
         err = ESP_ERR_NOT_FOUND;
     } else if (strcmp(name, s_prog.selected_file) != 0) {
@@ -593,6 +589,64 @@ static esp_err_t select_handler(httpd_req_t *req)
         s_prog.message[0] = '\0';
         strlcpy(s_prog.stage, "空闲", sizeof(s_prog.stage));
     }
+    return err;
+}
+
+typedef struct {
+    const char *current;
+    char first[STORAGE_MAX_NAME];
+    char next[STORAGE_MAX_NAME];
+} next_file_t;
+
+static void find_next_file(const storage_file_info_t *info, void *ctx)
+{
+    next_file_t *files = ctx;
+    if (!storage_name_valid(info->name)) return;
+    if (!files->first[0] || strcmp(info->name, files->first) < 0)
+        strlcpy(files->first, info->name, sizeof(files->first));
+    if (strcmp(info->name, files->current) > 0 &&
+        (!files->next[0] || strcmp(info->name, files->next) < 0))
+        strlcpy(files->next, info->name, sizeof(files->next));
+}
+
+esp_err_t programmer_clear_failure(void)
+{
+    xSemaphoreTake(s_prog.mu, portMAX_DELAY);
+    esp_err_t err = ESP_ERR_INVALID_STATE;
+    if (s_prog.state == PROG_FAILED) {
+        s_prog.state = PROG_IDLE;
+        s_prog.percent = 0;
+        s_prog.cancelled = false;
+        s_prog.message[0] = '\0';
+        strlcpy(s_prog.stage, "空闲", sizeof(s_prog.stage));
+        err = ESP_OK;
+    }
+    xSemaphoreGive(s_prog.mu);
+    return err;
+}
+
+esp_err_t programmer_select_next(void)
+{
+    if (!try_idle_io()) return ESP_ERR_INVALID_STATE;
+    xSemaphoreTake(s_prog.mu, portMAX_DELAY);
+    next_file_t files = {.current = s_prog.selected_file};
+    storage_list(find_next_file, &files);
+    const char *name = files.next[0] ? files.next : files.first;
+    esp_err_t err = name[0] ? select_file_locked(name) : ESP_ERR_NOT_FOUND;
+    xSemaphoreGive(s_prog.mu);
+    xSemaphoreGive(s_prog.io_mu);
+    return err;
+}
+
+static esp_err_t select_handler(httpd_req_t *req)
+{
+    char name[STORAGE_MAX_NAME];
+    if (!get_query_param(req, "file", name, sizeof(name)) || !storage_name_valid(name)) {
+        return send_json_error(req, 400, "文件名无效");
+    }
+    if (!try_idle_io()) return send_json_error(req, 500, "设备忙，请稍后重试");
+    xSemaphoreTake(s_prog.mu, portMAX_DELAY);
+    esp_err_t err = select_file_locked(name);
     xSemaphoreGive(s_prog.mu);
     xSemaphoreGive(s_prog.io_mu);
     if (err != ESP_OK) return send_json_error(req, err == ESP_ERR_NOT_FOUND ? 404 : 500,

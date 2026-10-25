@@ -24,11 +24,13 @@ static inline const char *esp_err_to_name(esp_err_t err) { return err ? "ERROR" 
 #define ESP_LOGW(...) ((void)0)
 #define ESP_LOGE(...) ((void)0)
 #define ESP_RETURN_ON_ERROR(expr, ...) do { esp_err_t e_ = (expr); if (e_) return e_; } while (0)
+#ifndef __APPLE__
 static inline size_t strlcpy(char *dst, const char *src, size_t n) {
     size_t len = strlen(src);
     if (n) { size_t copied = len < n - 1 ? len : n - 1; memcpy(dst, src, copied); dst[copied] = 0; }
     return len;
 }
+#endif
 #define CONFIG_PROG_FLASH_BLOCK_SIZE 1024
 #define CONFIG_PROG_TOOL0_TX_GPIO 0
 #define CONFIG_PROG_TOOL0_RX_GPIO 1

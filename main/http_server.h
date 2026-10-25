@@ -17,11 +17,14 @@ typedef struct {
     uint32_t percent;
     char file[STORAGE_MAX_NAME];
     char stage[32];
+    char chip[11];
     bool cancelled;
 } prog_status_t;
 
 /* Call after http_server_start(). Same job/status for HTTP and front panel. */
 esp_err_t programmer_start_selected(void);
+esp_err_t programmer_select_next(void);
+esp_err_t programmer_clear_failure(void);
 void programmer_get_status(prog_status_t *status);
 
 #ifdef __cplusplus

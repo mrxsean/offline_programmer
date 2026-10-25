@@ -18,7 +18,10 @@
 #define OLED_WIDTH     72
 #define OLED_PAGES     5
 #define OLED_COLUMN    28
-#define OLED_CHAR_WIDTH       6
+#define OLED_CHAR_WIDTH       8
+#define OLED_GLYPH_WIDTH      7
+#define OLED_GLYPH_HEIGHT     11
+#define BUTTON_LONG_MS        1000
 #define OLED_REFRESH_MS       100
 #define OLED_SCROLL_PAUSE_MS  1000
 #define OLED_SCROLL_STEP      2
@@ -77,7 +80,7 @@ static const uint8_t font_lower[26][5] = {
     {0x0c,0x50,0x50,0x50,0x3c}, {0x44,0x64,0x54,0x4c,0x44},
 };
 
-static void draw_text(unsigned page, const char *text, TickType_t elapsed)
+static void draw_text(unsigned y, const char *text, TickType_t elapsed)
 {
     size_t len = strlen(text);
     size_t cycle_chars = len + OLED_SCROLL_GAP_CHARS;
@@ -108,11 +111,16 @@ static void draw_text(unsigned page, const char *text, TickType_t elapsed)
             glyph[0] = 0x63; glyph[1] = 0x13; glyph[2] = 0x08;
             glyph[3] = 0x64; glyph[4] = 0x63;
         }
-        /* Clip both edges so partially visible glyphs stay on this row. */
-        for (int col = 0; col < 5; col++) {
+        /* Scale 5x7 glyphs to 7x11, including pixels spanning page boundaries. */
+        for (unsigned col = 0; col < OLED_GLYPH_WIDTH; col++) {
             int pixel = x + col;
-            if (pixel >= 0 && pixel < OLED_WIDTH) {
-                s_frame[1 + page * OLED_WIDTH + pixel] = bits[col];
+            if (pixel < 0 || pixel >= OLED_WIDTH) continue;
+            for (unsigned row = 0; row < OLED_GLYPH_HEIGHT; row++) {
+                unsigned py = y + row;
+                if (py < OLED_PAGES * 8 && (bits[col * 5 / OLED_GLYPH_WIDTH] &
+                    (1U << (row * 7 / OLED_GLYPH_HEIGHT)))) {
+                    s_frame[1 + py / 8 * OLED_WIDTH + pixel] |= 1U << (py % 8);
+                }
             }
         }
     }
@@ -129,10 +137,8 @@ static void render_status(const prog_status_t *status, TickType_t elapsed)
         draw_text(0, "NO FILE", elapsed);
     }
     const char *label = "READY";
-    const char *hint = len ? "PRESS KEY" : "SELECT WEB";
-    char percent[12];
+    char line[32];
     unsigned pct = status->percent > 100 ? 100 : status->percent;
-    snprintf(percent, sizeof(percent), "%u%%", pct);
     if (status->state == PROG_RUNNING) {
         label = "RUNNING";
         if (strcmp(status->stage, "解析文件") == 0) label = "LOADING";
@@ -140,25 +146,19 @@ static void render_status(const prog_status_t *status, TickType_t elapsed)
         else if (strcmp(status->stage, "编程") == 0) label = "PROGRAM";
         else if (strcmp(status->stage, "校验") == 0) label = "VERIFY";
         else if (strstr(status->stage, "擦除")) label = "ERASE";
-        hint = percent;
     } else if (status->state == PROG_DONE) {
         label = "SUCCESS";
-        hint = percent;
     } else if (status->state == PROG_FAILED) {
         label = "FAILED";
-        hint = strcmp(status->stage, "无固件") == 0 ? "SELECT WEB" : "CHECK LOG";
     } else if (status->cancelled) {
         label = "CANCELLED";
     }
-    draw_text(2, label, elapsed);
-    draw_text(3, hint, elapsed);
+    draw_text(14, status->chip[0] ? status->chip : "NO CHIP", elapsed);
     if (status->state == PROG_RUNNING || status->state == PROG_DONE) {
-        unsigned fill = pct * (OLED_WIDTH - 2) / 100;
-        for (unsigned x = 0; x < OLED_WIDTH; x++) {
-            s_frame[1 + 4 * OLED_WIDTH + x] =
-                x == 0 || x == OLED_WIDTH - 1 || x <= fill ? 0x7e : 0x42;
-        }
+        snprintf(line, sizeof(line), "%s %u%%", label, pct);
+        label = line;
     }
+    draw_text(28, label, elapsed);
 }
 
 static esp_err_t oled_flush(void)
@@ -237,31 +237,42 @@ static void oled_update(const prog_status_t *status, TickType_t elapsed, TickTyp
     }
 }
 
+typedef enum { BUTTON_NONE, BUTTON_START, BUTTON_NEXT } button_action_t;
+
 typedef struct {
     bool raw_pressed;
     bool pressed;
     bool armed;
     bool blocked;
     TickType_t changed;
+    TickType_t down_since;
 } button_t;
 
-static bool button_update(button_t *button, bool pressed, bool busy, TickType_t now)
+static button_action_t button_update(button_t *button, bool pressed, bool busy, TickType_t now)
 {
     if (pressed != button->raw_pressed) {
         button->raw_pressed = pressed;
         button->changed = now;
-        button->blocked = busy;
     }
-    if (pressed && busy) button->blocked = true;
-    if (pressed == button->pressed || now - button->changed < pdMS_TO_TICKS(40)) return false;
-    button->pressed = pressed;
-    if (!pressed) {
-        button->armed = true;
-        return false;
+    if (busy && (pressed || button->pressed)) button->blocked = true;
+    if (pressed != button->pressed && now - button->changed >= pdMS_TO_TICKS(40)) {
+        button->pressed = pressed;
+        if (pressed) {
+            button->down_since = button->changed;
+        } else {
+            bool start = button->armed && !button->blocked && !busy;
+            button->armed = true;
+            button->blocked = false;
+            if (start) return button->changed - button->down_since >= pdMS_TO_TICKS(BUTTON_LONG_MS)
+                              ? BUTTON_NEXT : BUTTON_START;
+        }
     }
-    bool start = button->armed && !busy && !button->blocked;
-    button->armed = false;
-    return start;
+    if (pressed && button->pressed && button->armed && !button->blocked && !busy &&
+        now - button->down_since >= pdMS_TO_TICKS(BUTTON_LONG_MS)) {
+        button->blocked = true;
+        return BUTTON_NEXT;
+    }
+    return BUTTON_NONE;
 }
 
 static int led_level(prog_state_t state, TickType_t elapsed)
@@ -284,10 +295,14 @@ static void panel_task(void *arg)
         TickType_t now = xTaskGetTickCount();
         prog_status_t status;
         programmer_get_status(&status);
-        if (button_update(&button, gpio_get_level(BUTTON_GPIO) == 0,
-                          status.state == PROG_RUNNING, now)) {
-            esp_err_t err = programmer_start_selected();
-            if (err != ESP_OK) ESP_LOGW(TAG, "button start: %s", esp_err_to_name(err));
+        button_action_t action = button_update(&button, gpio_get_level(BUTTON_GPIO) == 0,
+                                               status.state == PROG_RUNNING, now);
+        if (action != BUTTON_NONE) {
+            esp_err_t err;
+            if (action == BUTTON_NEXT) err = programmer_select_next();
+            else if (status.state == PROG_FAILED) err = programmer_clear_failure();
+            else err = programmer_start_selected();
+            if (err != ESP_OK) ESP_LOGW(TAG, "button action: %s", esp_err_to_name(err));
             programmer_get_status(&status);
         }
         if (status.state != previous) {

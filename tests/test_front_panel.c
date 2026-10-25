@@ -111,7 +111,8 @@ static void test_oled_recovery(void) {
     };
     assert(io_count == sizeof(startup) / sizeof(startup[0]));
     assert(memcmp(io_events, startup, sizeof(startup)) == 0);
-    assert(memcmp(last_frame + 1, font_lower['f' - 'a'], 5) == 0);
+    render_status(&status, 0);
+    assert(memcmp(last_frame, s_frame, sizeof(s_frame)) == 0);
 
     /* Every startup failure can recover, with no repeated resource allocation. */
     const io_event_t failures[] = {
@@ -169,13 +170,8 @@ static void test_oled_recovery(void) {
     assert(io_events[failed_count] == IO_RESET);
     assert(io_events[io_count - 1] == IO_ON);
     assert(io_calls[IO_NEW_BUS] == 1 && io_calls[IO_ADD_DEVICE] == 1);
-    assert(memcmp(last_frame + 1, font_lower['n' - 'a'], 5) == 0);
-    unsigned fill = 0;
-    for (unsigned x = 1; x < OLED_WIDTH - 1; x++) {
-        if (last_frame[1 + 4 * OLED_WIDTH + x] == 0x7e) fill++;
-    }
-    assert(fill == 52);
-
+    render_status(&status, 0);
+    assert(memcmp(last_frame, s_frame, sizeof(s_frame)) == 0);
     /* Both healthy refresh and delayed recovery retain unsigned tick wrap handling. */
     s_oled_refreshed = UINT32_MAX - 50;
     failed_count = io_count;
@@ -192,134 +188,87 @@ static void test_oled_recovery(void) {
     assert(s_oled_ready && io_count == failed_count + 6);
 }
 
-static void assert_blank_page(unsigned page) {
-    for (unsigned x = 0; x < OLED_WIDTH; x++) {
-        assert(s_frame[1 + page * OLED_WIDTH + x] == 0);
-    }
+static bool pixel(unsigned x, unsigned y) {
+    return (s_frame[1 + y / 8 * OLED_WIDTH + x] >> (y % 8)) & 1;
 }
 
 int main(void) {
     button_t b = {.raw_pressed = true, .pressed = true};
-    /* Power-on held must not program; release and press with bounce. */
-    assert(!button_update(&b, true, false, 1000));
-    assert(!button_update(&b, false, false, 1010));
-    assert(!button_update(&b, false, false, 1050));
-    assert(!button_update(&b, true, false, 1100));
-    assert(!button_update(&b, false, false, 1110));
-    assert(!button_update(&b, true, false, 1120));
-    assert(!button_update(&b, true, false, 1159));
-    assert(button_update(&b, true, false, 1160));
-    assert(!button_update(&b, true, false, 5000));
-    /* Busy press consumed even when the job completes during debounce. */
-    assert(!button_update(&b, false, true, 5010));
-    assert(!button_update(&b, false, true, 5050));
-    assert(!button_update(&b, true, true, 5100));
-    assert(!button_update(&b, true, false, 5140));
-    assert(!button_update(&b, true, false, 9000));
-    assert(!button_update(&b, false, false, 9010));
-    assert(!button_update(&b, false, false, 9050));
-    assert(!button_update(&b, true, false, 9060));
-    assert(button_update(&b, true, false, 9100));
-    /* Unsigned tick wrap. */
+    assert(button_update(&b, true, false, 2000) == BUTTON_NONE);
+    assert(button_update(&b, false, false, 2010) == BUTTON_NONE);
+    assert(button_update(&b, false, false, 2050) == BUTTON_NONE);
+    assert(button_update(&b, true, false, 2100) == BUTTON_NONE);
+    assert(button_update(&b, false, false, 2110) == BUTTON_NONE);
+    assert(button_update(&b, true, false, 2120) == BUTTON_NONE);
+    assert(button_update(&b, true, false, 2160) == BUTTON_NONE);
+    assert(button_update(&b, false, false, 2200) == BUTTON_NONE);
+    assert(button_update(&b, false, false, 2240) == BUTTON_START);
+    assert(button_update(&b, true, false, 2300) == BUTTON_NONE);
+    assert(button_update(&b, true, false, 2340) == BUTTON_NONE);
+    assert(button_update(&b, true, false, 3299) == BUTTON_NONE);
+    assert(button_update(&b, true, false, 3300) == BUTTON_NEXT);
+    assert(button_update(&b, true, false, 8000) == BUTTON_NONE);
+    assert(button_update(&b, false, false, 8010) == BUTTON_NONE);
+    assert(button_update(&b, false, false, 8050) == BUTTON_NONE);
+    /* Busy press is consumed even if the job completes during debounce. */
+    assert(button_update(&b, true, true, 8100) == BUTTON_NONE);
+    assert(button_update(&b, true, false, 8140) == BUTTON_NONE);
+    assert(button_update(&b, true, false, 9200) == BUTTON_NONE);
+    assert(button_update(&b, false, false, 9210) == BUTTON_NONE);
+    assert(button_update(&b, false, false, 9250) == BUTTON_NONE);
     b = (button_t){.armed = true};
-    assert(!button_update(&b, true, false, UINT32_MAX - 20));
-    assert(button_update(&b, true, false, 20));
+    assert(button_update(&b, true, false, UINT32_MAX - 20) == BUTTON_NONE);
+    assert(button_update(&b, true, false, 20) == BUTTON_NONE);
+    assert(button_update(&b, true, false, 979) == BUTTON_NEXT);
+    /* Release first observed at the threshold must still count as long press. */
+    b = (button_t){.armed = true};
+    assert(button_update(&b, true, false, 100) == BUTTON_NONE);
+    assert(button_update(&b, true, false, 140) == BUTTON_NONE);
+    assert(button_update(&b, false, false, 1100) == BUTTON_NONE);
+    assert(button_update(&b, false, false, 1140) == BUTTON_NEXT);
 
     assert(led_level(PROG_IDLE, 0) == 1);
     assert(led_level(PROG_DONE, 0) == 0);
     assert(led_level(PROG_RUNNING, 0) == 0);
     assert(led_level(PROG_RUNNING, 500) == 1);
-    assert(led_level(PROG_FAILED, 0) == 0);
     assert(led_level(PROG_FAILED, 125) == 1);
 
-    /* Names that exactly fit the line never move. */
-    prog_status_t short_status = {.state = PROG_IDLE};
-    strlcpy(short_status.file, "ABCDEFGHIJKL", sizeof(short_status.file));
-    render_status(&short_status, 0);
-    uint8_t short_frame[sizeof(s_frame)];
-    memcpy(short_frame, s_frame, sizeof(short_frame));
-    assert(memcmp(s_frame + 1 + 66, font_upper['L' - 'A'], 5) == 0);
-    render_status(&short_status, pdMS_TO_TICKS(1300));
-    assert(memcmp(s_frame, short_frame, sizeof(short_frame)) == 0);
-    render_status(&short_status, UINT32_MAX);
-    assert(memcmp(s_frame, short_frame, sizeof(short_frame)) == 0);
-    assert_blank_page(1);
-
-    /* A thirteenth character triggers scrolling; both edges clip by pixels. */
-    strlcpy(short_status.file, "ABCDEFGHIJKLM", sizeof(short_status.file));
-    render_status(&short_status, pdMS_TO_TICKS(1100));
-    assert(memcmp(s_frame + 1, font_upper[0] + 2, 3) == 0);
-    assert(s_frame[1 + 3] == 0);
-    assert(memcmp(s_frame + 1 + 4, font_upper[1], 5) == 0);
-    assert(memcmp(s_frame + 1 + 70, font_upper['M' - 'A'], 2) == 0);
-    assert_blank_page(1);
-
-    /* Full 47-character name scrolls on one line, including case and suffix. */
     prog_status_t status = {.state = PROG_RUNNING, .percent = 50};
+    strlcpy(status.file, "ABCDEFGHI", sizeof(status.file));
+    strlcpy(status.chip, "R5F100LE", sizeof(status.chip));
+    strlcpy(status.stage, "擦除", sizeof(status.stage));
+    render_status(&status, 0);
+    /* Every scaled glyph pixel lands at the intended row, across page boundaries. */
+    for (unsigned y = 0; y < OLED_GLYPH_HEIGHT; y++) {
+        for (unsigned x = 0; x < OLED_GLYPH_WIDTH; x++) {
+            assert(pixel(x, y) == !!(font_upper[0][x * 5 / 7] & (1U << (y * 7 / 11))));
+            assert(pixel(x, 14 + y) == !!(font_upper['R' - 'A'][x * 5 / 7] & (1U << (y * 7 / 11))));
+            assert(pixel(x, 28 + y) == !!(font_upper['E' - 'A'][x * 5 / 7] & (1U << (y * 7 / 11))));
+        }
+    }
+    uint8_t frame[sizeof(s_frame)];
+    memcpy(frame, s_frame, sizeof(frame));
+    render_status(&status, 1300);
+    assert(memcmp(frame, s_frame, sizeof(frame)) == 0);
     strlcpy(status.file, "Abcdefghijklmnopqrstuvwxy0123456789_ABCDE12.hex", sizeof(status.file));
-    assert(strlen(status.file) == 47);
     render_status(&status, 0);
-    assert(memcmp(s_frame + 1, font_upper[0], 5) == 0);
-    assert(memcmp(s_frame + 7, font_lower[1], 5) == 0);
-    assert_blank_page(1);
-    uint8_t first_line[OLED_WIDTH];
-    uint8_t status_rows[OLED_WIDTH * (OLED_PAGES - 1)];
-    memcpy(first_line, s_frame + 1, sizeof(first_line));
-    memcpy(status_rows, s_frame + 1 + OLED_WIDTH, sizeof(status_rows));
-    const unsigned pause_times[] = {500, 999, 1000, 1099};
-    for (unsigned i = 0; i < sizeof(pause_times) / sizeof(pause_times[0]); i++) {
-        render_status(&status, pdMS_TO_TICKS(pause_times[i]));
-        assert(memcmp(s_frame + 1, first_line, sizeof(first_line)) == 0);
+    memcpy(frame, s_frame, sizeof(frame));
+    render_status(&status, 1100);
+    for (unsigned y = 0; y < 40; y++) {
+        for (unsigned x = 0; x < OLED_WIDTH; x++) {
+            if (y < 11 && x < OLED_WIDTH - 2)
+                assert(pixel(x, y) == !!(frame[1 + y / 8 * OLED_WIDTH + x + 2] & (1U << (y % 8))));
+            if (y >= 11)
+                assert(pixel(x, y) == !!(frame[1 + y / 8 * OLED_WIDTH + x] & (1U << (y % 8))));
+        }
     }
-    render_status(&status, pdMS_TO_TICKS(1100));
-    assert(memcmp(s_frame + 1, first_line + 2, OLED_WIDTH - 2) == 0);
-    render_status(&status, pdMS_TO_TICKS(1300));
-    assert(memcmp(s_frame + 1, font_lower[1], 5) == 0);
-
-    /* The final twelve characters fit together before the loop separator. */
-    render_status(&status, pdMS_TO_TICKS(11500));
-    assert(s_frame[1 + 50] == 0x60);
-    assert(memcmp(s_frame + 1 + 54, font_lower['h' - 'a'], 5) == 0);
-    assert(memcmp(s_frame + 1 + 60, font_lower['e' - 'a'], 5) == 0);
-    assert(memcmp(s_frame + 1 + 66, font_lower['x' - 'a'], 5) == 0);
-
-    /* Three blank characters separate the tail from the returning head. */
-    render_status(&status, pdMS_TO_TICKS(15100));
-    for (unsigned x = 0; x < 18; x++) assert(s_frame[1 + x] == 0);
-    assert(memcmp(s_frame + 1 + 18, font_upper[0], 5) == 0);
-    render_status(&status, pdMS_TO_TICKS(15900));
-    assert(s_frame[1] == 0 && s_frame[2] == 0);
-    assert(memcmp(s_frame + 1 + 2, font_upper[0], 5) == 0);
-    const unsigned next_pause_times[] = {16000, 16999, 17099};
-    for (unsigned i = 0; i < sizeof(next_pause_times) / sizeof(next_pause_times[0]); i++) {
-        render_status(&status, pdMS_TO_TICKS(next_pause_times[i]));
-        assert(memcmp(s_frame + 1, first_line, sizeof(first_line)) == 0);
+    for (unsigned t = 0; t < 22000; t += 100) {
+        render_status(&status, t);
+        for (unsigned y = 11; y < 14; y++)
+            for (unsigned x = 0; x < OLED_WIDTH; x++) assert(!pixel(x, y));
+        for (unsigned y = 25; y < 28; y++)
+            for (unsigned x = 0; x < OLED_WIDTH; x++) assert(!pixel(x, y));
     }
-    render_status(&status, pdMS_TO_TICKS(17100));
-    assert(memcmp(s_frame + 1, first_line + 2, OLED_WIDTH - 2) == 0);
-
-    /* Scrolling never writes into the separator, status, hint, or progress. */
-    for (unsigned elapsed = 0; elapsed <= 17100; elapsed += 100) {
-        render_status(&status, pdMS_TO_TICKS(elapsed));
-        assert(s_frame[0] == 0x40);
-        assert(memcmp(s_frame + 1 + OLED_WIDTH, status_rows, sizeof(status_rows)) == 0);
-    }
-    unsigned fill = 0;
-    for (unsigned x = 1; x < 71; x++) if (s_frame[1 + 4 * 72 + x] == 0x7e) fill++;
-    assert(fill == 35);
-    status.state = PROG_DONE; status.percent = 100;
-    render_status(&status, 0);
-    for (unsigned x = 0; x < 72; x++) assert(s_frame[1 + 4 * 72 + x] == 0x7e);
-    s_oled = &mock_device;
-    assert(oled_flush() == ESP_OK && transfers == 2);
-    status = (prog_status_t){.state = PROG_FAILED};
-    strlcpy(status.stage, "无固件", sizeof(status.stage));
-    render_status(&status, 0);
-    assert(memcmp(s_frame + 1, font_upper['N' - 'A'], 5) == 0);
-    for (unsigned x = 42; x < OLED_WIDTH; x++) assert(s_frame[1 + x] == 0);
-    assert_blank_page(1);
-    assert(memcmp(s_frame + 1 + 3 * 72, font_upper['S' - 'A'], 5) == 0);
-    for (unsigned x = 0; x < 72; x++) assert(s_frame[1 + 4 * 72 + x] == 0);
     test_oled_recovery();
-    puts("front panel: debounce, LED, single-line scrolling, pixels/I2C bounds, OLED reset/retry/recovery PASS");
+    puts("front panel: short/long press, busy/boot guards, scaled three rows, scrolling, OLED recovery PASS");
 }

@@ -34,6 +34,14 @@ esp_err_t nvs_commit(nvs_handle_t h) {
 bool __wrap_storage_exists(const char *name) {
     return file_exists && (strcmp(name, "App_v1.hex") == 0 || strcmp(name, "Other.bin") == 0);
 }
+int __wrap_storage_list(storage_list_cb_t cb, void *ctx) {
+    if (!file_exists) return 0;
+    storage_file_info_t info = {.name = "Other.bin"};
+    cb(&info, ctx);
+    strlcpy(info.name, "App_v1.hex", sizeof(info.name));
+    cb(&info, ctx);
+    return 2;
+}
 esp_err_t __wrap_storage_delete(const char *name) {
     if (!__wrap_storage_exists(name)) return ESP_ERR_NOT_FOUND;
     file_exists = false; return ESP_OK;
@@ -168,5 +176,44 @@ int main(void) {
     commit_fail = false;
     delete_handler(&req); assert(!file_exists && !saved[0]);
     boot(); assert(!s_prog.selected_file[0]);
+    s_prog.state = PROG_FAILED;
+    s_prog.percent = 33;
+    strlcpy(s_prog.message, "failure", sizeof(s_prog.message));
+    char failed_file[STORAGE_MAX_NAME];
+    strlcpy(failed_file, s_prog.file, sizeof(failed_file));
+    int before_tasks = task_count;
+    assert(programmer_clear_failure() == ESP_OK);
+    assert(s_prog.state == PROG_IDLE && s_prog.percent == 0 && !s_prog.message[0]);
+    assert(strcmp(s_prog.file, failed_file) == 0 && task_count == before_tasks);
+    assert(programmer_clear_failure() == ESP_ERR_INVALID_STATE);
+    s_prog.state = PROG_RUNNING;
+    assert(programmer_clear_failure() == ESP_ERR_INVALID_STATE);
+    assert(s_prog.state == PROG_RUNNING);
+    s_prog.state = PROG_IDLE;
+    file_exists = true;
+    assert(programmer_select_next() == ESP_OK);
+    assert(strcmp(s_prog.file, "App_v1.hex") == 0);
+    assert(programmer_select_next() == ESP_OK);
+    assert(strcmp(s_prog.file, "Other.bin") == 0 && strcmp(saved, "Other.bin") == 0);
+    commit_fail = true;
+    assert(programmer_select_next() == ESP_FAIL);
+    assert(strcmp(s_prog.file, "Other.bin") == 0);
+    commit_fail = false;
+    assert(programmer_select_next() == ESP_OK);
+    assert(strcmp(s_prog.file, "App_v1.hex") == 0);
+    s_prog.state = PROG_RUNNING;
+    assert(programmer_select_next() == ESP_ERR_INVALID_STATE);
+    s_prog.state = PROG_IDLE;
+    io_lock = 1;
+    assert(programmer_select_next() == ESP_ERR_INVALID_STATE);
+    io_lock = 0;
+    file_exists = false;
+    assert(programmer_select_next() == ESP_ERR_NOT_FOUND);
+    assert(!state_lock && !io_lock);
+    s_prog.dev_valid = true;
+    strlcpy(s_prog.sig.device_name, "R5F100LE", sizeof(s_prog.sig.device_name));
+    prog_status_t panel_status;
+    programmer_get_status(&panel_status);
+    assert(strcmp(panel_status.chip, "R5F100LE") == 0);
     puts("programmer: persistence, invalid input, busy guards, full job, errors and cancellation PASS");
 }
