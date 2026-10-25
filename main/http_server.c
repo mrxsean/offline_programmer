@@ -12,6 +12,7 @@
 #include "esp_log.h"
 #include "esp_check.h"
 #include "esp_http_server.h"
+#include "nvs.h"
 
 #include "storage.h"
 #include "image_parser.h"
@@ -24,20 +25,22 @@ extern const uint8_t index_html_end[]   asm("_binary_index_html_end");
 
 /* ---------------- programming job state ---------------- */
 
-typedef enum { PROG_IDLE, PROG_RUNNING, PROG_DONE, PROG_FAILED } prog_state_t;
-
 #define LOG_BUF_SIZE 8192
 
 static struct {
     SemaphoreHandle_t mu;
     SemaphoreHandle_t io_mu;        /* serializes target UART access */
     prog_state_t state;
+    char selected_file[STORAGE_MAX_NAME];
+    char file[STORAGE_MAX_NAME];
+    nvs_handle_t nvs;
     char stage[32];
     char message[192];
     uint32_t percent;
     char log[LOG_BUF_SIZE];
     size_t log_len;
     bool cancel;
+    bool cancelled;
     bool dev_valid;
     rl78_signature_t sig;
 } s_prog;
@@ -97,6 +100,25 @@ static void set_prog_state(prog_state_t state, const char *stage, const char *me
     xSemaphoreGive(s_prog.mu);
 }
 
+static bool cancel_requested(void)
+{
+    xSemaphoreTake(s_prog.mu, portMAX_DELAY);
+    bool cancel = s_prog.cancel;
+    xSemaphoreGive(s_prog.mu);
+    return cancel;
+}
+
+void programmer_get_status(prog_status_t *status)
+{
+    xSemaphoreTake(s_prog.mu, portMAX_DELAY);
+    status->state = s_prog.state;
+    status->percent = s_prog.percent;
+    strlcpy(status->file, s_prog.file, sizeof(status->file));
+    strlcpy(status->stage, s_prog.stage, sizeof(status->stage));
+    status->cancelled = s_prog.cancelled;
+    xSemaphoreGive(s_prog.mu);
+}
+
 /* ---------------- programming task ---------------- */
 
 static const char *nack_hint(void)
@@ -111,7 +133,7 @@ static esp_err_t erase_range(uint32_t start, uint32_t end_excl, uint32_t blksz,
     bool blank;
     uint32_t total = (end_excl - start + blksz - 1) / blksz;
     uint32_t done = 0;
-    for (uint32_t addr = start; addr < end_excl && !s_prog.cancel; addr += blksz) {
+    for (uint32_t addr = start; addr < end_excl && !cancel_requested(); addr += blksz) {
         esp_err_t err = rl78_block_blank_check(addr, blksz, &blank);
         if (err != ESP_OK) {
             prog_log("空白检查失败 @0x%06" PRIX32 ": %s", addr, nack_hint());
@@ -127,7 +149,7 @@ static esp_err_t erase_range(uint32_t start, uint32_t end_excl, uint32_t blksz,
         done++;
         set_prog_state(PROG_RUNNING, "擦除", NULL, pct_base + pct_span * done / total);
     }
-    return s_prog.cancel ? ESP_ERR_INVALID_STATE : ESP_OK;
+    return cancel_requested() ? ESP_ERR_INVALID_STATE : ESP_OK;
 }
 
 static void program_task(void *arg)
@@ -175,12 +197,16 @@ static void program_task(void *arg)
     /* 2. enter programming mode and read the signature */
     set_prog_state(PROG_RUNNING, "连接目标", NULL, 2);
     prog_log("进入目标编程模式 ...");
-    result = rl78_enter_programming_mode(&s_prog.sig);
+    rl78_signature_t sig;
+    result = rl78_enter_programming_mode(&sig);
     if (result != ESP_OK) {
         prog_log("目标连接失败: %s。请检查接线与供电后重试。", nack_hint());
         goto out;
     }
+    xSemaphoreTake(s_prog.mu, portMAX_DELAY);
+    s_prog.sig = sig;
     s_prog.dev_valid = true;
+    xSemaphoreGive(s_prog.mu);
     {
         uint32_t code_kb = (s_prog.sig.code_flash_end + 1) / 1024;
         prog_log("目标芯片: %s, 设备编码 %02X%02X%02X, 代码闪存 %" PRIu32 " KB",
@@ -221,7 +247,7 @@ static void program_task(void *arg)
         uint32_t done = 0;
         uint32_t pct_span = job.verify ? 60 : 95;
         set_prog_state(PROG_RUNNING, "编程", NULL, 5);
-        for (uint32_t addr = start; addr < img_end && !s_prog.cancel; addr += blksz) {
+        for (uint32_t addr = start; addr < img_end && !cancel_requested(); addr += blksz) {
             done++;
             bool any = image_build_block(&img, addr, blk, blksz);
             set_prog_state(PROG_RUNNING, "编程", NULL, 5 + pct_span * done / total);
@@ -252,7 +278,7 @@ static void program_task(void *arg)
                 goto out;
             }
         }
-        if (s_prog.cancel) {
+        if (cancel_requested()) {
             result = ESP_ERR_INVALID_STATE;
             goto out;
         }
@@ -267,7 +293,7 @@ static void program_task(void *arg)
         uint32_t done = 0;
         uint32_t pct_base = job.program ? 65 : 5;
         set_prog_state(PROG_RUNNING, "校验", NULL, pct_base);
-        for (uint32_t addr = start; addr < img_end && !s_prog.cancel; addr += blksz) {
+        for (uint32_t addr = start; addr < img_end && !cancel_requested(); addr += blksz) {
             done++;
             bool any = image_build_block(&img, addr, blk, blksz);
             set_prog_state(PROG_RUNNING, "校验", NULL, pct_base + (95 - pct_base) * done / total);
@@ -280,7 +306,7 @@ static void program_task(void *arg)
                 goto out;
             }
         }
-        if (s_prog.cancel) {
+        if (cancel_requested()) {
             result = ESP_ERR_INVALID_STATE;
             goto out;
         }
@@ -294,8 +320,12 @@ out:
     }
     rl78_reset_target();
 
-    bool cancelled = s_prog.cancel;
-    if (result == ESP_OK) {
+    bool cancelled = cancel_requested();
+    xSemaphoreTake(s_prog.mu, portMAX_DELAY);
+    s_prog.cancelled = cancelled;
+    s_prog.cancel = false;
+    xSemaphoreGive(s_prog.mu);
+    if (result == ESP_OK && !cancelled) {
         prog_log("===== 任务完成 =====");
         set_prog_state(PROG_DONE, "完成", "烧录成功，目标已复位运行", 100);
     } else if (cancelled) {
@@ -306,7 +336,6 @@ out:
         set_prog_state(PROG_FAILED, "失败", esp_err_to_name(result), 0);
     }
 
-    s_prog.cancel = false;
     xSemaphoreGive(s_prog.io_mu);
     vTaskDelete(NULL);
 }
@@ -384,15 +413,18 @@ static esp_err_t files_list_handler(httpd_req_t *req)
 
     size_t total = 0, used = 0;
     storage_usage(&total, &used);
+    xSemaphoreTake(s_prog.mu, portMAX_DELAY);
     snprintf(acc.buf + acc.len, acc.cap - acc.len,
-             "],\"total\":%u,\"used\":%u}", (unsigned)total, (unsigned)used);
+             "],\"total\":%u,\"used\":%u,\"selected\":\"%s\"}",
+             (unsigned)total, (unsigned)used, s_prog.selected_file);
+    xSemaphoreGive(s_prog.mu);
 
     esp_err_t err = send_json(req, acc.buf);
     free(acc.buf);
     return err;
 }
 
-static esp_err_t upload_handler(httpd_req_t *req)
+static esp_err_t upload_file(httpd_req_t *req)
 {
     char name[STORAGE_MAX_NAME];
     if (!get_query_param(req, "name", name, sizeof(name)) || !storage_name_valid(name)) {
@@ -480,16 +512,91 @@ static esp_err_t download_handler(httpd_req_t *req)
     return err;
 }
 
-static esp_err_t delete_handler(httpd_req_t *req)
+static esp_err_t delete_file(httpd_req_t *req)
 {
     char name[STORAGE_MAX_NAME];
     if (!get_query_param(req, "name", name, sizeof(name)) || !storage_name_valid(name)) {
         return send_json_error(req, 400, "文件名无效");
     }
+    xSemaphoreTake(s_prog.mu, portMAX_DELAY);
+    if (strcmp(name, s_prog.selected_file) == 0) {
+        esp_err_t err = nvs_set_str(s_prog.nvs, "selected", "");
+        if (err == ESP_OK) err = nvs_commit(s_prog.nvs);
+        if (err != ESP_OK) {
+            xSemaphoreGive(s_prog.mu);
+            return send_json_error(req, 500, "清除固件选择失败");
+        }
+        s_prog.selected_file[0] = '\0';
+        s_prog.file[0] = '\0';
+        s_prog.state = PROG_IDLE;
+        s_prog.percent = 0;
+        s_prog.cancelled = false;
+        s_prog.message[0] = '\0';
+        strlcpy(s_prog.stage, "空闲", sizeof(s_prog.stage));
+    }
+    xSemaphoreGive(s_prog.mu);
     if (storage_delete(name) != ESP_OK) {
         return send_json_error(req, 404, "文件不存在");
     }
     ESP_LOGI(TAG, "deleted %s", name);
+    return send_json(req, "{\"ok\":true}");
+}
+
+/* Lock order: io_mu, then mu. The worker owns io_mu while using the image/target. */
+static bool try_idle_io(void)
+{
+    if (xSemaphoreTake(s_prog.io_mu, 0) != pdTRUE) return false;
+    xSemaphoreTake(s_prog.mu, portMAX_DELAY);
+    bool idle = s_prog.state != PROG_RUNNING;
+    xSemaphoreGive(s_prog.mu);
+    if (!idle) xSemaphoreGive(s_prog.io_mu);
+    return idle;
+}
+
+static esp_err_t upload_handler(httpd_req_t *req)
+{
+    if (!try_idle_io()) return send_json_error(req, 500, "设备忙，请稍后重试");
+    esp_err_t err = upload_file(req);
+    xSemaphoreGive(s_prog.io_mu);
+    return err;
+}
+
+static esp_err_t delete_handler(httpd_req_t *req)
+{
+    if (!try_idle_io()) return send_json_error(req, 500, "设备忙，请稍后重试");
+    esp_err_t err = delete_file(req);
+    xSemaphoreGive(s_prog.io_mu);
+    return err;
+}
+
+static esp_err_t select_handler(httpd_req_t *req)
+{
+    char name[STORAGE_MAX_NAME];
+    if (!get_query_param(req, "file", name, sizeof(name)) || !storage_name_valid(name)) {
+        return send_json_error(req, 400, "文件名无效");
+    }
+    if (!try_idle_io()) return send_json_error(req, 500, "设备忙，请稍后重试");
+    esp_err_t err = ESP_OK;
+    xSemaphoreTake(s_prog.mu, portMAX_DELAY);
+    if (!storage_exists(name)) {
+        err = ESP_ERR_NOT_FOUND;
+    } else if (strcmp(name, s_prog.selected_file) != 0) {
+        err = nvs_set_str(s_prog.nvs, "selected", name);
+        if (err == ESP_OK) err = nvs_commit(s_prog.nvs);
+    }
+    if (err == ESP_OK) {
+        strlcpy(s_prog.selected_file, name, sizeof(s_prog.selected_file));
+        strlcpy(s_prog.file, name, sizeof(s_prog.file));
+        s_prog.state = PROG_IDLE;
+        s_prog.percent = 0;
+        s_prog.cancelled = false;
+        s_prog.message[0] = '\0';
+        strlcpy(s_prog.stage, "空闲", sizeof(s_prog.stage));
+    }
+    xSemaphoreGive(s_prog.mu);
+    xSemaphoreGive(s_prog.io_mu);
+    if (err != ESP_OK) return send_json_error(req, err == ESP_ERR_NOT_FOUND ? 404 : 500,
+                                             err == ESP_ERR_NOT_FOUND ? "文件不存在" : "保存固件选择失败");
     return send_json(req, "{\"ok\":true}");
 }
 
@@ -512,15 +619,11 @@ static void format_device_json(char *buf, size_t size, const rl78_signature_t *s
 
 static esp_err_t connect_handler(httpd_req_t *req)
 {
-    if (s_prog.state == PROG_RUNNING) {
-        return send_json_error(req, 500, "烧录进行中");
-    }
-    xSemaphoreTake(s_prog.io_mu, portMAX_DELAY);
+    if (!try_idle_io()) return send_json_error(req, 500, "设备忙，请稍后重试");
     rl78_signature_t sig;
     esp_err_t err = rl78_enter_programming_mode(&sig);
-    xSemaphoreGive(s_prog.io_mu);
-
     if (err != ESP_OK) {
+        xSemaphoreGive(s_prog.io_mu);
         prog_log("连接目标失败: %s", nack_hint());
         return send_json_error(req, 500, "目标无响应，请检查接线与供电");
     }
@@ -528,6 +631,7 @@ static esp_err_t connect_handler(httpd_req_t *req)
     memcpy(&s_prog.sig, &sig, sizeof(sig));
     s_prog.dev_valid = true;
     xSemaphoreGive(s_prog.mu);
+    xSemaphoreGive(s_prog.io_mu);
 
     prog_log("目标芯片: %s (代码闪存 %" PRIu32 " KB)", sig.device_name,
              (sig.code_flash_end + 1) / 1024);
@@ -539,53 +643,84 @@ static esp_err_t connect_handler(httpd_req_t *req)
     return send_json(req, resp);
 }
 
-static esp_err_t program_handler(httpd_req_t *req)
+static esp_err_t start_program(const char *file, bool erase, bool program, bool verify)
 {
-    if (s_prog.state == PROG_RUNNING) {
-        return send_json_error(req, 500, "已有烧录任务进行中");
-    }
-    prog_job_t *job = calloc(1, sizeof(prog_job_t));
-    if (!job) {
-        return send_json_error(req, 500, "内存不足");
-    }
-    char val[8];
-    if (!get_query_param(req, "file", job->file, sizeof(job->file)) || !storage_name_valid(job->file)) {
-        free(job);
-        return send_json_error(req, 400, "文件名无效");
-    }
-    if (!storage_exists(job->file)) {
-        free(job);
-        return send_json_error(req, 404, "文件不存在");
-    }
-    if (get_query_param(req, "erase", val, sizeof(val)))   job->erase   = val[0] == '1';
-    if (get_query_param(req, "program", val, sizeof(val))) job->program = val[0] == '1';
-    if (get_query_param(req, "verify", val, sizeof(val)))  job->verify  = val[0] == '1';
-    if (!job->erase && !job->program && !job->verify) {
-        free(job);
-        return send_json_error(req, 400, "未选择任何操作");
-    }
-    /* verify-only and erase-only don't need the image except for extent; keep it simple */
+    if (file && !storage_name_valid(file)) return ESP_ERR_INVALID_ARG;
+    if (!erase && !program && !verify) return ESP_ERR_INVALID_ARG;
+    if (!try_idle_io()) return ESP_ERR_INVALID_STATE;
 
     xSemaphoreTake(s_prog.mu, portMAX_DELAY);
-    s_prog.log_len = 0;
-    s_prog.log[0] = '\0';
-    s_prog.cancel = false;
-    s_prog.state = PROG_RUNNING;
+    const char *name = file ? file : s_prog.selected_file;
+    esp_err_t err = ESP_OK;
+    prog_job_t *job = NULL;
+    if (!storage_exists(name)) {
+        err = ESP_ERR_NOT_FOUND;
+    } else {
+        job = calloc(1, sizeof(prog_job_t));
+        if (!job) err = ESP_ERR_NO_MEM;
+    }
+    if (err == ESP_OK) {
+        strlcpy(job->file, name, sizeof(job->file));
+        job->erase = erase;
+        job->program = program;
+        job->verify = verify;
+        strlcpy(s_prog.file, name, sizeof(s_prog.file));
+        s_prog.log_len = 0;
+        s_prog.log[0] = '\0';
+        s_prog.cancel = false;
+        s_prog.cancelled = false;
+        s_prog.percent = 0;
+        s_prog.message[0] = '\0';
+        strlcpy(s_prog.stage, "解析文件", sizeof(s_prog.stage));
+        s_prog.state = PROG_RUNNING;
+        if (xTaskCreate(program_task, "prog_task", 6144, job, 5, NULL) != pdPASS) {
+            free(job);
+            err = ESP_ERR_NO_MEM;
+        }
+    }
+    if (err != ESP_OK && (!file || s_prog.state == PROG_RUNNING)) {
+        s_prog.state = PROG_FAILED;
+        s_prog.percent = 0;
+        s_prog.cancelled = false;
+        strlcpy(s_prog.file, name, sizeof(s_prog.file));
+        strlcpy(s_prog.stage, err == ESP_ERR_NOT_FOUND ? "无固件" : "失败", sizeof(s_prog.stage));
+        strlcpy(s_prog.message, esp_err_to_name(err), sizeof(s_prog.message));
+    }
     xSemaphoreGive(s_prog.mu);
+    xSemaphoreGive(s_prog.io_mu);
+    return err;
+}
 
-    if (xTaskCreate(program_task, "prog_task", 6144, job, 5, NULL) != pdPASS) {
-        free(job);
-        set_prog_state(PROG_IDLE, "空闲", NULL, 0);
-        return send_json_error(req, 500, "任务创建失败");
+esp_err_t programmer_start_selected(void)
+{
+    return start_program(NULL, true, true, true);
+}
+
+static esp_err_t program_handler(httpd_req_t *req)
+{
+    char file[STORAGE_MAX_NAME], val[8];
+    if (!get_query_param(req, "file", file, sizeof(file))) {
+        return send_json_error(req, 400, "文件名无效");
+    }
+    bool erase = get_query_param(req, "erase", val, sizeof(val)) && val[0] == '1';
+    bool program = get_query_param(req, "program", val, sizeof(val)) && val[0] == '1';
+    bool verify = get_query_param(req, "verify", val, sizeof(val)) && val[0] == '1';
+    esp_err_t err = start_program(file, erase, program, verify);
+    if (err != ESP_OK) {
+        return send_json_error(req, err == ESP_ERR_INVALID_ARG ? 400 :
+                                   err == ESP_ERR_NOT_FOUND ? 404 : 500,
+                               err == ESP_ERR_INVALID_ARG ? "文件名或操作无效" :
+                               err == ESP_ERR_NOT_FOUND ? "文件不存在" :
+                               err == ESP_ERR_INVALID_STATE ? "设备忙，请稍后重试" : "任务创建失败");
     }
     return send_json(req, "{\"ok\":true}");
 }
 
 static esp_err_t cancel_handler(httpd_req_t *req)
 {
-    if (s_prog.state == PROG_RUNNING) {
-        s_prog.cancel = true;
-    }
+    xSemaphoreTake(s_prog.mu, portMAX_DELAY);
+    if (s_prog.state == PROG_RUNNING) s_prog.cancel = true;
+    xSemaphoreGive(s_prog.mu);
     return send_json(req, "{\"ok\":true}");
 }
 
@@ -691,6 +826,21 @@ static esp_err_t status_handler(httpd_req_t *req)
     return err;
 }
 
+static esp_err_t load_selection(void)
+{
+    ESP_RETURN_ON_ERROR(nvs_open("programmer", NVS_READWRITE, &s_prog.nvs), TAG, "open selection");
+    size_t len = sizeof(s_prog.selected_file);
+    esp_err_t err = nvs_get_str(s_prog.nvs, "selected", s_prog.selected_file, &len);
+    if (err == ESP_ERR_NVS_NOT_FOUND || err == ESP_ERR_NVS_INVALID_LENGTH) {
+        s_prog.selected_file[0] = '\0';
+    } else if (err != ESP_OK) {
+        return err;
+    }
+    if (!storage_name_valid(s_prog.selected_file)) s_prog.selected_file[0] = '\0';
+    strlcpy(s_prog.file, s_prog.selected_file, sizeof(s_prog.file));
+    return ESP_OK;
+}
+
 /* ---------------- server setup ---------------- */
 
 esp_err_t http_server_start(void)
@@ -700,6 +850,7 @@ esp_err_t http_server_start(void)
     configASSERT(s_prog.mu && s_prog.io_mu);
     s_prog.state = PROG_IDLE;
     strlcpy(s_prog.stage, "空闲", sizeof(s_prog.stage));
+    ESP_RETURN_ON_ERROR(load_selection(), TAG, "load selection failed");
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.max_uri_handlers = 12;
@@ -718,6 +869,7 @@ esp_err_t http_server_start(void)
         { .uri = "/api/file",    .method = HTTP_GET,    .handler = download_handler },
         { .uri = "/api/file",    .method = HTTP_DELETE, .handler = delete_handler },
         { .uri = "/api/connect", .method = HTTP_POST,   .handler = connect_handler },
+        { .uri = "/api/select",  .method = HTTP_POST,   .handler = select_handler },
         { .uri = "/api/program", .method = HTTP_POST,   .handler = program_handler },
         { .uri = "/api/cancel",  .method = HTTP_POST,   .handler = cancel_handler },
         { .uri = "/api/status",  .method = HTTP_GET,    .handler = status_handler },

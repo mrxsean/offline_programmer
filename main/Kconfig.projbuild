@@ -27,20 +27,20 @@ menu "Offline Programmer Configuration"
 
         config PROG_TOOL0_TX_GPIO
             int "TOOL0 TX GPIO"
-            default 6
+            default 0
             help
                 UART TX pin. Connect to RL78 TOOL0 through a ~1k resistor
                 (ties together with RX pin for 1-wire UART mode).
 
         config PROG_TOOL0_RX_GPIO
             int "TOOL0 RX GPIO"
-            default 7
+            default 1
             help
                 UART RX pin. Connect directly to RL78 TOOL0.
 
         config PROG_RESET_GPIO
             int "RESET GPIO"
-            default 10
+            default 2
             help
                 Connect to RL78 RESET pin.
 

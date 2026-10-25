@@ -100,6 +100,7 @@ tr.selected:hover td { background:#e2ecfc; }
   <div class="card">
     <h2><span class="dot"></span>烧录控制</h2>
     <div style="font-size:13px;color:#5b6b83">当前固件：<b id="selFile" style="color:#1f2733">未选择</b></div>
+    <div class="usage">文件“选择”后保存到设备，断电保留；实体按键固定执行擦除＋编程＋校验。</div>
     <div class="opts">
       <label><input type="checkbox" id="optErase" checked>擦除</label>
       <label><input type="checkbox" id="optProgram" checked>编程</label>
@@ -126,6 +127,7 @@ tr.selected:hover td { background:#e2ecfc; }
 <script>
 let selectedFile = null;
 let polling = null;
+let programRunning = false;
 
 function toast(msg) {
   const t = document.getElementById('toast');
@@ -145,6 +147,8 @@ async function refreshFiles() {
   try {
     const r = await fetch('/api/files');
     const d = await r.json();
+    selectedFile = d.selected || null;
+    updateSelUI();
     document.getElementById('usageTip').textContent =
       '存储空间：已用 ' + fmtSize(d.used) + ' / 共 ' + fmtSize(d.total);
     const tbody = document.getElementById('fileTbody');
@@ -174,15 +178,19 @@ async function refreshFiles() {
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 function jsq(s) { return s.replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
 
-function selectFile(name) {
-  selectedFile = name;
-  updateSelUI();
-  refreshFiles();
+async function selectFile(name) {
+  try {
+    const r = await fetch('/api/select?file=' + encodeURIComponent(name), { method:'POST' });
+    const d = await r.json();
+    if (!d.ok) { toast('选择失败：' + (d.error || '')); return; }
+    toast('已保存，按键将烧录此固件');
+    await refreshFiles();
+  } catch(e) { toast('选择失败：网络错误'); }
 }
 
 function updateSelUI() {
   document.getElementById('selFile').textContent = selectedFile || '未选择';
-  document.getElementById('btnProgram').disabled = !selectedFile;
+  document.getElementById('btnProgram').disabled = !selectedFile || programRunning;
 }
 
 function downloadFile(name) {
@@ -285,6 +293,7 @@ async function refreshStatus() {
   try {
     const r = await fetch('/api/status');
     const d = await r.json();
+    programRunning = d.state === 'running';
     const badge = document.getElementById('stateBadge');
     const map = { idle:['空闲','state-idle'], running:['烧录中','state-run'], done:['完成','state-ok'], failed:['失败','state-fail'] };
     const m = map[d.state] || map.idle;

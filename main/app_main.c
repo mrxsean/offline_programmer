@@ -14,6 +14,7 @@
 #include "wifi_ap.h"
 #include "http_server.h"
 #include "rl78_prog.h"
+#include "front_panel.h"
 
 static const char *TAG = "main";
 
@@ -30,6 +31,7 @@ void app_main(void)
     ESP_ERROR_CHECK(rl78_prog_init());
     ESP_ERROR_CHECK(wifi_ap_init());
     ESP_ERROR_CHECK(http_server_start());
+    ESP_ERROR_CHECK(front_panel_init());
 
     ESP_LOGI(TAG, "============================================");
     ESP_LOGI(TAG, "RL78 offline programmer ready");

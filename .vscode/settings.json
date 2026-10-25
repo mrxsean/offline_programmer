@@ -25,6 +25,8 @@
   "idf.port": "/dev/ttyACM0",
   "idf.currentSetup": "/home/sean/esp/v5.3/esp-idf",
   "idf.customExtraVars": {
+    "OPENOCD_SCRIPTS": "/home/sean/esp/.espressif/tools/openocd-esp32/v0.12.0-esp32-20240318/openocd-esp32/share/openocd/scripts",
+    "ESP_ROM_ELF_DIR": "/home/sean/esp/.espressif/tools/esp-rom-elfs/20240305/",
     "IDF_TARGET": "esp32c3"
   }
 }
