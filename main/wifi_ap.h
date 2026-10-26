@@ -9,6 +9,7 @@ extern "C" {
 
 /* Start the SoftAP with credentials from Kconfig. Logs the AP IP address. */
 esp_err_t wifi_ap_init(void);
+const char *wifi_ap_ssid(void);
 
 #ifdef __cplusplus
 }

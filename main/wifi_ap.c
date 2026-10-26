@@ -1,6 +1,7 @@
 #include "wifi_ap.h"
 
 #include <string.h>
+#include <stdio.h>
 #include "sdkconfig.h"
 #include "esp_log.h"
 #include "esp_check.h"
@@ -10,6 +11,12 @@
 #include "esp_mac.h"
 
 static const char *TAG = "wifi_ap";
+static char s_ssid[33];
+
+const char *wifi_ap_ssid(void)
+{
+    return s_ssid;
+}
 
 static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -42,8 +49,11 @@ esp_err_t wifi_ap_init(void)
             .beacon_interval = 100,
         },
     };
-    strlcpy((char *)ap_cfg.ap.ssid, CONFIG_PROG_WIFI_SSID, sizeof(ap_cfg.ap.ssid));
-    ap_cfg.ap.ssid_len = strlen(CONFIG_PROG_WIFI_SSID);
+    uint8_t mac[6];
+    ESP_RETURN_ON_ERROR(esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP), TAG, "read AP MAC failed");
+    snprintf(s_ssid, sizeof(s_ssid), "%.27s-%02X%02X", CONFIG_PROG_WIFI_SSID, mac[4], mac[5]);
+    ap_cfg.ap.ssid_len = strlen(s_ssid);
+    memcpy(ap_cfg.ap.ssid, s_ssid, ap_cfg.ap.ssid_len);
     if (strlen(CONFIG_PROG_WIFI_PASSWORD) >= 8) {
         strlcpy((char *)ap_cfg.ap.password, CONFIG_PROG_WIFI_PASSWORD, sizeof(ap_cfg.ap.password));
         ap_cfg.ap.authmode = WIFI_AUTH_WPA2_PSK;
@@ -55,14 +65,14 @@ esp_err_t wifi_ap_init(void)
     ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg), TAG, "set config failed");
     ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "wifi start failed");
     /* TX power is in 0.25 dBm units: 34 = 8.5 dBm. Must be set after Wi-Fi starts. */
-   ESP_RETURN_ON_ERROR(esp_wifi_set_max_tx_power(34), TAG, "set tx power failed");
+   ESP_RETURN_ON_ERROR(esp_wifi_set_max_tx_power(20), TAG, "set tx power failed");
     esp_wifi_set_ps(WIFI_PS_NONE);
 
     esp_netif_ip_info_t ip;
     esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
     if (netif && esp_netif_get_ip_info(netif, &ip) == ESP_OK) {
         ESP_LOGI(TAG, "AP started: SSID=\"%s\" channel=%d, http://" IPSTR "/",
-                 CONFIG_PROG_WIFI_SSID, CONFIG_PROG_WIFI_CHANNEL, IP2STR(&ip.ip));
+                 s_ssid, CONFIG_PROG_WIFI_CHANNEL, IP2STR(&ip.ip));
     }
     return ESP_OK;
 }

@@ -35,7 +35,7 @@ void app_main(void)
 
     ESP_LOGI(TAG, "============================================");
     ESP_LOGI(TAG, "RL78 offline programmer ready");
-    ESP_LOGI(TAG, "WiFi  SSID : %s", CONFIG_PROG_WIFI_SSID);
+    ESP_LOGI(TAG, "WiFi  SSID : %s", wifi_ap_ssid());
     ESP_LOGI(TAG, "TOOL0      : TX=GPIO%d RX=GPIO%d (tie to RL78 TOOL0)",
              CONFIG_PROG_TOOL0_TX_GPIO, CONFIG_PROG_TOOL0_RX_GPIO);
     ESP_LOGI(TAG, "RESET      : GPIO%d -> RL78 RESET", CONFIG_PROG_RESET_GPIO);

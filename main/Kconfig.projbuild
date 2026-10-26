@@ -2,10 +2,10 @@ menu "Offline Programmer Configuration"
 
     menu "WiFi AP"
         config PROG_WIFI_SSID
-            string "WiFi SSID"
+            string "WiFi SSID prefix"
             default "RL78-Flasher"
             help
-                SSID of the WiFi hotspot created by the device.
+                Hotspot prefix (up to 27 bytes); -XXXX is appended from the SoftAP MAC.
 
         config PROG_WIFI_PASSWORD
             string "WiFi Password"

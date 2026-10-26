@@ -1,5 +1,11 @@
 #include "../main/http_server.c"
 
+const uint8_t index_html_start[] = {0};
+const uint8_t index_html_end[] = {0};
+esp_err_t esp_littlefs_info(const char *label, size_t *total, size_t *used) {
+    *total = 0x1e0000; *used = 0; return ESP_OK;
+}
+
 static int state_lock, io_lock, task_count;
 static bool task_fail, commit_fail, file_exists = true, target_fail, verify_fail, cancel_verify;
 static char saved[STORAGE_MAX_NAME], pending[STORAGE_MAX_NAME];
@@ -54,6 +60,14 @@ esp_err_t httpd_resp_send(httpd_req_t *r, const char *s, ssize_t len) {
     assert((size_t)len < sizeof(r->response));
     memcpy(r->response, s, len); r->response[len] = 0; return ESP_OK;
 }
+esp_err_t httpd_resp_send_chunk(httpd_req_t *r, const char *s, ssize_t len) {
+    if (!s) return ESP_OK;
+    if (len == HTTPD_RESP_USE_STRLEN) len = strlen(s);
+    size_t offset = strlen(r->response);
+    assert(offset + len < sizeof(r->response));
+    memcpy(r->response + offset, s, len); r->response[offset + len] = 0;
+    return ESP_OK;
+}
 esp_err_t httpd_req_get_url_query_str(httpd_req_t *r, char *dst, size_t len) {
     if (strlen(r->query) >= len) return ESP_ERR_INVALID_SIZE;
     strlcpy(dst, r->query, len); return ESP_OK;
@@ -66,7 +80,49 @@ esp_err_t httpd_query_key_value(const char *q, const char *key, char *dst, size_
     if (n >= len) return ESP_ERR_INVALID_SIZE;
     memcpy(dst, value, n); dst[n] = 0; return ESP_OK;
 }
-int httpd_req_recv(httpd_req_t *r, char *dst, size_t len) { assert(false); return -1; }
+static uint8_t ota_image[9000];
+static size_t ota_rx, ota_written, ota_fragment, ota_disconnect;
+static int ota_fail, ota_aborts, ota_ends, ota_boots, ota_restarts, ota_begins;
+static bool ota_partition_missing;
+static const esp_partition_t ota_partition = {.size = 0x100000};
+static const esp_app_desc_t ota_desc = {
+    .magic_word = ESP_APP_DESC_MAGIC_WORD, .project_name = "offline_programmer",
+    .version = "1.0.0", .date = "Oct 26 2026", .time = "18:12:34"
+};
+int httpd_req_recv(httpd_req_t *r, char *dst, size_t len) {
+    assert(io_lock && programmer_start_selected() == ESP_ERR_INVALID_STATE);
+    if (ota_rx >= ota_disconnect) return -1;
+    if (len > ota_fragment) len = ota_fragment;
+    if (len > ota_disconnect - ota_rx) len = ota_disconnect - ota_rx;
+    assert(ota_rx + len <= sizeof(ota_image));
+    memcpy(dst, ota_image + ota_rx, len); ota_rx += len; return len;
+}
+const esp_app_desc_t *esp_app_get_description(void) { return &ota_desc; }
+const esp_partition_t *esp_ota_get_next_update_partition(const esp_partition_t *p) {
+    return ota_partition_missing ? NULL : &ota_partition;
+}
+esp_err_t esp_ota_begin(const esp_partition_t *p, size_t size, esp_ota_handle_t *h) {
+    assert(p == &ota_partition && size == OTA_WITH_SEQUENTIAL_WRITES);
+    ota_begins++; *h = 1; return ota_fail == 1 ? ESP_FAIL : ESP_OK;
+}
+esp_err_t esp_ota_write(esp_ota_handle_t h, const void *data, size_t len) {
+    assert(h == 1 && ota_written + len <= sizeof(ota_image));
+    assert(memcmp(data, ota_image + ota_written, len) == 0);
+    ota_written += len; return ota_fail == 2 ? ESP_FAIL : ESP_OK;
+}
+esp_err_t esp_ota_end(esp_ota_handle_t h) {
+    assert(h == 1); ota_ends++; return ota_fail == 3 ? ESP_FAIL : ESP_OK;
+}
+esp_err_t esp_ota_abort(esp_ota_handle_t h) { assert(h == 1); ota_aborts++; return ESP_OK; }
+esp_err_t esp_ota_set_boot_partition(const esp_partition_t *p) {
+    assert(ota_ends == 1 && ota_fail != 3); ota_boots++;
+    return ota_fail == 4 ? ESP_FAIL : ESP_OK;
+}
+void vTaskDelay(TickType_t delay) { assert(delay == 1500 && io_lock); }
+void esp_restart(void) {
+    assert(io_lock && programmer_start_selected() == ESP_ERR_INVALID_STATE);
+    ota_restarts++;
+}
 
 uint8_t rl78_last_nack(void) { return 0; }
 const char *rl78_status_str(uint8_t status) { return "NACK"; }
@@ -108,6 +164,58 @@ static void select_file(const char *query, bool ok) {
     httpd_req_t req = {.query = query};
     assert(select_handler(&req) == ESP_OK);
     assert(strstr(req.response, ok ? "\"ok\":true" : "\"ok\":false"));
+}
+
+static void reset_ota(void) {
+    boot();
+    memset(ota_image, 0x5a, sizeof(ota_image));
+    ota_image[0] = ESP_IMAGE_HEADER_MAGIC;
+    memcpy(ota_image + sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t),
+           &ota_desc, sizeof(ota_desc));
+    ota_rx = ota_written = 0;
+    ota_fragment = 4096;
+    ota_disconnect = sizeof(ota_image);
+    ota_fail = ota_aborts = ota_ends = ota_boots = ota_restarts = ota_begins = 0;
+    ota_partition_missing = false;
+}
+static void check_ota_failure(int size) {
+    httpd_req_t req = {.content_len = size};
+    assert(ota_handler(&req) == ESP_FAIL);
+    assert(strstr(req.response, "\"ok\":false"));
+    assert(!io_lock && !state_lock && !ota_restarts);
+}
+static void test_ota(void) {
+    reset_ota(); check_ota_failure(0); assert(!ota_begins);
+    reset_ota(); check_ota_failure(287); assert(!ota_begins);
+    reset_ota(); check_ota_failure(ota_partition.size + 1); assert(!ota_begins);
+    reset_ota(); ota_partition_missing = true; check_ota_failure(sizeof(ota_image));
+    reset_ota(); ota_image[0] = 0; check_ota_failure(sizeof(ota_image)); assert(!ota_begins);
+    reset_ota(); ota_image[32] = 0; check_ota_failure(sizeof(ota_image)); assert(!ota_begins);
+    reset_ota(); ota_image[32 + offsetof(esp_app_desc_t, project_name)] = 'X'; check_ota_failure(sizeof(ota_image)); assert(!ota_begins);
+    reset_ota(); ota_disconnect = 20; check_ota_failure(sizeof(ota_image)); assert(!ota_begins);
+    reset_ota(); ota_disconnect = 500; check_ota_failure(sizeof(ota_image));
+    assert(ota_aborts == 1 && !ota_ends && !ota_boots);
+    for (int failure = 1; failure <= 4; failure++) {
+        reset_ota(); ota_fail = failure; check_ota_failure(sizeof(ota_image));
+        assert(ota_aborts == (failure == 2));
+        assert(ota_boots == (failure == 4));
+    }
+    reset_ota(); s_prog.state = PROG_RUNNING;
+    check_ota_failure(sizeof(ota_image)); assert(!ota_begins && !ota_rx);
+    reset_ota(); io_lock = 1;
+    httpd_req_t busy = {.content_len = sizeof(ota_image)};
+    assert(ota_handler(&busy) == ESP_FAIL && io_lock && !ota_begins);
+    io_lock = 0;
+    for (unsigned fragment = 1; fragment <= 4096; fragment *= 8) {
+        reset_ota(); ota_fragment = fragment;
+        httpd_req_t req = {.content_len = sizeof(ota_image)};
+        assert(ota_handler(&req) == ESP_OK);
+        assert(strstr(req.response, "\"ok\":true"));
+        assert(ota_written == sizeof(ota_image) && ota_ends == 1 && ota_boots == 1);
+        assert(!ota_aborts && ota_restarts == 1 && io_lock);
+        io_lock = 0;
+    }
+    puts("OTA: sizes, headers, project, disconnects, API failures, fragmented stream and busy guards PASS");
 }
 
 int main(void) {
@@ -215,5 +323,10 @@ int main(void) {
     prog_status_t panel_status;
     programmer_get_status(&panel_status);
     assert(strcmp(panel_status.chip, "R5F100LE") == 0);
+    test_ota();
+    httpd_req_t info = {0};
+    assert(info_handler(&info) == ESP_OK);
+    assert(strcmp(info.response, "{\"ok\":true,\"version\":\"1.0.0\","
+                  "\"build_date\":\"Oct 26 2026\",\"build_time\":\"18:12:34\"}") == 0);
     puts("programmer: persistence, invalid input, busy guards, full job, errors and cancellation PASS");
 }

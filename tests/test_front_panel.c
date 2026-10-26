@@ -6,6 +6,12 @@ typedef enum {
 } io_event_t;
 
 static char mock_bus, mock_device;
+static const char *mock_ssid = "RL78-Flasher-A1B2";
+const char *wifi_ap_ssid(void) { return mock_ssid; }
+static const esp_app_desc_t mock_app = {
+    .version = "1.0.0", .date = "Oct 26 2026", .time = "18:12:34"
+};
+const esp_app_desc_t *esp_app_get_description(void) { return &mock_app; }
 static io_event_t io_events[128];
 static unsigned io_count, io_calls[IO_COUNT], transfers;
 static io_event_t fail_event;
@@ -270,5 +276,43 @@ int main(void) {
             for (unsigned x = 0; x < OLED_WIDTH; x++) assert(!pixel(x, y));
     }
     test_oled_recovery();
+    /* Splash stays visible through 2999ms, then restores the normal status. */
+    s_wifi_splash = true;
+    s_wifi_since = 100;
+    s_oled_refreshed = 100;
+    render_status(&status, 0);
+    memcpy(frame, s_frame, sizeof(frame));
+    oled_update(&status, 0, 3099);
+    assert(s_wifi_splash && memcmp(frame, s_frame, sizeof(frame)) == 0);
+    oled_update(&status, 0, 3100);
+    assert(!s_wifi_splash);
+    assert(memcmp(frame, s_frame, sizeof(frame)) != 0);
+    /* Five small rows show the SSID, version, date and time simultaneously. */
+    s_wifi_splash = true;
+    render_status(&status, 0);
+    for (unsigned y = 0; y < 7; y++) {
+        for (unsigned x = 0; x < 5; x++) {
+            assert(pixel(x, y) == !!(font_upper['R' - 'A'][x] & (1U << y)));
+            assert(pixel(x, 8 + y) == !!(0x08 & (1U << y)));
+            assert(pixel(x, 16 + y) == !!(font_upper['V' - 'A'][x] & (1U << y)));
+            assert(pixel(x, 24 + y) == !!(font_upper['O' - 'A'][x] & (1U << y)));
+            assert(pixel(x, 32 + y) == !!(font_digits[1][x] & (1U << y)));
+            assert(pixel(12 + x, 32 + y) == (x == 2 && !!(0x14 & (1U << y))));
+        }
+    }
+    for (unsigned y = 7; y < 40; y += 8)
+        for (unsigned x = 0; x < OLED_WIDTH; x++) assert(!pixel(x, y));
+    /* A maximum-length prefix scrolls, while its MAC suffix stays visible. */
+    mock_ssid = "123456789012345678901234567-A1B2";
+    render_status(&status, 0);
+    memcpy(frame, s_frame, sizeof(frame));
+    render_status(&status, 800);
+    assert(memcmp(frame, s_frame, OLED_WIDTH + 1) != 0);
+    assert(memcmp(frame + OLED_WIDTH + 1, s_frame + OLED_WIDTH + 1,
+                  sizeof(frame) - OLED_WIDTH - 1) == 0);
+    for (unsigned y = 0; y < 7; y++)
+        for (unsigned x = 0; x < 5; x++)
+            assert(pixel(11 * 6 + x, 8 + y) == !!(font_digits[2][x] & (1U << y)));
+    s_wifi_splash = false;
     puts("front panel: short/long press, busy/boot guards, scaled three rows, scrolling, OLED recovery PASS");
 }

@@ -9,7 +9,9 @@
 #include "driver/i2c_master.h"
 #include "esp_check.h"
 #include "esp_log.h"
+#include "esp_app_desc.h"
 #include "http_server.h"
+#include "wifi_ap.h"
 
 #define LED_GPIO       8
 #define BUTTON_GPIO    9
@@ -39,6 +41,8 @@ static i2c_master_bus_handle_t s_oled_bus;
 static i2c_master_dev_handle_t s_oled;
 static bool s_oled_ready;
 static TickType_t s_oled_refreshed;
+static bool s_wifi_splash;
+static TickType_t s_wifi_since;
 static uint8_t s_frame[1 + OLED_WIDTH * OLED_PAGES];
 
 /* Five columns, bit 0 at the top. Only filename characters and UI glyphs. */
@@ -80,22 +84,23 @@ static const uint8_t font_lower[26][5] = {
     {0x0c,0x50,0x50,0x50,0x3c}, {0x44,0x64,0x54,0x4c,0x44},
 };
 
-static void draw_text(unsigned y, const char *text, TickType_t elapsed)
+static void draw_text_size(unsigned y, const char *text, TickType_t elapsed,
+                           unsigned char_width, unsigned glyph_width, unsigned glyph_height)
 {
     size_t len = strlen(text);
     size_t cycle_chars = len + OLED_SCROLL_GAP_CHARS;
     size_t offset = 0;
-    bool scrolling = len * OLED_CHAR_WIDTH > OLED_WIDTH;
+    bool scrolling = len * char_width > OLED_WIDTH;
     if (scrolling) {
         TickType_t pause = pdMS_TO_TICKS(OLED_SCROLL_PAUSE_MS);
         TickType_t step_ticks = pdMS_TO_TICKS(OLED_REFRESH_MS);
         TickType_t cycle_ticks = pause +
-            cycle_chars * OLED_CHAR_WIDTH / OLED_SCROLL_STEP * step_ticks;
+            cycle_chars * char_width / OLED_SCROLL_STEP * step_ticks;
         TickType_t phase = elapsed % cycle_ticks;
         if (phase > pause) offset = (phase - pause) / step_ticks * OLED_SCROLL_STEP;
     }
-    int x = -(int)(offset % OLED_CHAR_WIDTH);
-    for (size_t i = offset / OLED_CHAR_WIDTH; x < OLED_WIDTH; i++, x += OLED_CHAR_WIDTH) {
+    int x = -(int)(offset % char_width);
+    for (size_t i = offset / char_width; x < OLED_WIDTH; i++, x += char_width) {
         size_t index = scrolling ? i % cycle_chars : i;
         if (index >= len) continue;
         unsigned char c = text[index];
@@ -105,6 +110,7 @@ static void draw_text(unsigned y, const char *text, TickType_t elapsed)
         else if (c >= 'A' && c <= 'Z') bits = font_upper[c - 'A'];
         else if (c >= 'a' && c <= 'z') bits = font_lower[c - 'a'];
         else if (c == '.') glyph[2] = 0x60;
+        else if (c == ':') glyph[2] = 0x14;
         else if (c == '_') memset(glyph, 0x40, sizeof(glyph));
         else if (c == '-') memset(glyph, 0x08, sizeof(glyph));
         else if (c == '%') {
@@ -112,13 +118,13 @@ static void draw_text(unsigned y, const char *text, TickType_t elapsed)
             glyph[3] = 0x64; glyph[4] = 0x63;
         }
         /* Scale 5x7 glyphs to 7x11, including pixels spanning page boundaries. */
-        for (unsigned col = 0; col < OLED_GLYPH_WIDTH; col++) {
+        for (unsigned col = 0; col < glyph_width; col++) {
             int pixel = x + col;
             if (pixel < 0 || pixel >= OLED_WIDTH) continue;
-            for (unsigned row = 0; row < OLED_GLYPH_HEIGHT; row++) {
+            for (unsigned row = 0; row < glyph_height; row++) {
                 unsigned py = y + row;
-                if (py < OLED_PAGES * 8 && (bits[col * 5 / OLED_GLYPH_WIDTH] &
-                    (1U << (row * 7 / OLED_GLYPH_HEIGHT)))) {
+                if (py < OLED_PAGES * 8 && (bits[col * 5 / glyph_width] &
+                    (1U << (row * 7 / glyph_height)))) {
                     s_frame[1 + py / 8 * OLED_WIDTH + pixel] |= 1U << (py % 8);
                 }
             }
@@ -126,10 +132,37 @@ static void draw_text(unsigned y, const char *text, TickType_t elapsed)
     }
 }
 
+static void draw_text(unsigned y, const char *text, TickType_t elapsed)
+{
+    draw_text_size(y, text, elapsed, OLED_CHAR_WIDTH, OLED_GLYPH_WIDTH, OLED_GLYPH_HEIGHT);
+}
+
+static void render_wifi(TickType_t elapsed)
+{
+    const char *ssid = wifi_ap_ssid();
+    size_t len = strlen(ssid);
+    size_t split = len > 24 ? len - 12 : (len > 12 ? 12 : len);
+    char line[33];
+    memcpy(line, ssid, split);
+    line[split] = '\0';
+    /* Long custom prefixes scroll faster so the MAC suffix stays on line two. */
+    draw_text_size(0, line, elapsed * 4, 6, 5, 7);
+    draw_text_size(8, ssid + split, 0, 6, 5, 7);
+    const esp_app_desc_t *app = esp_app_get_description();
+    snprintf(line, sizeof(line), "V%.31s", app->version);
+    draw_text_size(16, line, elapsed * 4, 6, 5, 7);
+    draw_text_size(24, app->date, 0, 6, 5, 7);
+    draw_text_size(32, app->time, 0, 6, 5, 7);
+}
+
 static void render_status(const prog_status_t *status, TickType_t elapsed)
 {
     memset(s_frame, 0, sizeof(s_frame));
     s_frame[0] = 0x40;
+    if (s_wifi_splash) {
+        render_wifi(elapsed);
+        return;
+    }
     size_t len = strlen(status->file);
     if (len) {
         draw_text(0, status->file, elapsed);
@@ -221,8 +254,10 @@ static esp_err_t oled_init(const prog_status_t *status, TickType_t elapsed)
 
 static void oled_update(const prog_status_t *status, TickType_t elapsed, TickType_t now)
 {
+    bool splash_done = s_wifi_splash && now - s_wifi_since >= pdMS_TO_TICKS(3000);
+    if (splash_done) s_wifi_splash = false;
     unsigned interval_ms = s_oled_ready ? OLED_REFRESH_MS : OLED_RETRY_MS;
-    if (now - s_oled_refreshed < pdMS_TO_TICKS(interval_ms)) return;
+    if (!splash_done && now - s_oled_refreshed < pdMS_TO_TICKS(interval_ms)) return;
     s_oled_refreshed = now;
     if (!s_oled_ready) {
         s_oled_ready = oled_init(status, elapsed) == ESP_OK;
@@ -334,9 +369,11 @@ esp_err_t front_panel_init(void)
     vTaskDelay(pdMS_TO_TICKS(100));
     prog_status_t status;
     programmer_get_status(&status);
+    s_wifi_splash = true;
     esp_err_t err = oled_init(&status, 0);
     s_oled_ready = err == ESP_OK;
     s_oled_refreshed = xTaskGetTickCount();
+    s_wifi_since = s_oled_refreshed;
     if (err != ESP_OK) ESP_LOGW(TAG, "OLED unavailable: %s; button/LED remain active", esp_err_to_name(err));
     return xTaskCreate(panel_task, "front_panel", 3072, NULL, 3, NULL) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
 }

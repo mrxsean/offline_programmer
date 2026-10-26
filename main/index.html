@@ -11,6 +11,7 @@ body { font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans
 header { background:linear-gradient(135deg,#1d5fd1,#12408f); color:#fff; border-radius:12px; padding:20px 24px; margin-bottom:16px; box-shadow:0 2px 8px rgba(0,0,0,.15); }
 header h1 { font-size:20px; font-weight:600; }
 header p { font-size:13px; opacity:.85; margin-top:4px; }
+fieldset { border:0; min-width:0; }
 .card { background:#fff; border-radius:12px; padding:18px 20px; margin-bottom:16px; box-shadow:0 1px 4px rgba(0,0,0,.08); }
 .card h2 { font-size:16px; font-weight:600; margin-bottom:14px; display:flex; align-items:center; gap:8px; }
 .card h2 .dot { width:8px; height:8px; border-radius:50%; background:#1d5fd1; }
@@ -60,8 +61,10 @@ tr.selected:hover td { background:#e2ecfc; }
   <header>
     <h1>RL78 离线编程器</h1>
     <p>基于 ESP32-C3 热点 + HTTP 的 Renesas RL78 系列 MCU 脱机烧写工具</p>
+    <p id="firmwareInfo">编程器版本 / 编译时间：读取中…</p>
   </header>
 
+  <fieldset id="programmerControls">
   <div class="card">
     <h2><span class="dot"></span>目标芯片</h2>
     <div class="row-flex">
@@ -121,6 +124,17 @@ tr.selected:hover td { background:#e2ecfc; }
     <h2><span class="dot"></span>运行日志</h2>
     <div id="log"></div>
   </div>
+  </fieldset>
+  <div class="card">
+    <h2><span class="dot"></span>编程器自身升级（OTA）</h2>
+    <p class="usage">选择本编程器的 offline_programmer.bin 应用固件。请勿上传 RL78 固件、bootloader.bin、分区表或合并镜像。升级期间保持供电，成功后自动重启。</p>
+    <div class="upload-row" style="margin-top:12px">
+      <input type="file" id="otaFile" accept=".bin">
+      <button class="btn-primary" id="btnOta" onclick="uploadOta()" disabled>升级编程器</button>
+    </div>
+    <div class="progress-outer" id="otaProgressOuter"><div class="progress-inner" id="otaProgress"></div></div>
+    <div class="usage" id="otaStatus" role="status"></div>
+  </div>
 </div>
 <div class="toast" id="toast"></div>
 
@@ -128,6 +142,7 @@ tr.selected:hover td { background:#e2ecfc; }
 let selectedFile = null;
 let polling = null;
 let programRunning = false;
+let otaBusy = false;
 
 function toast(msg) {
   const t = document.getElementById('toast');
@@ -290,10 +305,12 @@ async function cancelProgram() {
 /* ---------- status polling ---------- */
 let lastLogLen = 0;
 async function refreshStatus() {
+  if (otaBusy) return;
   try {
     const r = await fetch('/api/status');
     const d = await r.json();
     programRunning = d.state === 'running';
+    updateOtaButton();
     const badge = document.getElementById('stateBadge');
     const map = { idle:['空闲','state-idle'], running:['烧录中','state-run'], done:['完成','state-ok'], failed:['失败','state-fail'] };
     const m = map[d.state] || map.idle;
@@ -313,6 +330,79 @@ async function refreshStatus() {
   } catch(e) {}
 }
 
+/* ---------- programmer firmware OTA ---------- */
+function updateOtaButton() {
+  document.getElementById('btnOta').disabled = otaBusy || programRunning ||
+    !document.getElementById('otaFile').files.length;
+}
+document.getElementById('otaFile').addEventListener('change', updateOtaButton);
+
+function uploadOta() {
+  const input = document.getElementById('otaFile');
+  const file = input.files[0];
+  if (otaBusy || programRunning || !file) return;
+  if (!/\.bin$/i.test(file.name) || !file.size) {
+    toast('请选择非空的 .bin 应用固件');
+    return;
+  }
+  if (!confirm('升级编程器自身固件，完成后将自动重启。是否继续？')) return;
+  otaBusy = true;
+  clearInterval(polling);
+  document.getElementById('programmerControls').disabled = true;
+  input.disabled = true;
+  updateOtaButton();
+  const status = document.getElementById('otaStatus');
+  const progress = document.getElementById('otaProgress');
+  document.getElementById('otaProgressOuter').style.display = 'block';
+  progress.style.width = '0%';
+  status.textContent = '正在上传，请保持供电和 Wi-Fi 连接…';
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/ota');
+  xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+  xhr.timeout = 120000;
+  const failed = message => {
+    status.textContent = message;
+    otaBusy = false;
+    input.disabled = false;
+    document.getElementById('programmerControls').disabled = false;
+    updateOtaButton();
+    polling = setInterval(refreshStatus, 800);
+  };
+  xhr.upload.onprogress = e => {
+    if (!e.lengthComputable) return;
+    const percent = Math.round(e.loaded * 100 / e.total);
+    progress.style.width = percent + '%';
+    status.textContent = percent < 100 ? '正在上传：' + percent + '%' : '上传完成，正在写入并校验固件…';
+  };
+  xhr.onload = () => {
+    let data;
+    try { data = JSON.parse(xhr.responseText); }
+    catch(e) { failed('升级结果未确认，请重新连接热点并刷新页面检查。'); return; }
+    if (xhr.status !== 200 || !data.ok) {
+      failed('升级失败：' + (data.error || '服务器错误'));
+      return;
+    }
+    progress.style.width = '100%';
+    status.textContent = '升级成功，设备正在重启。请重新连接原热点并刷新页面。';
+  };
+  xhr.onerror = () => failed('连接中断，升级结果未确认。请重新连接热点并刷新页面检查。');
+  xhr.ontimeout = () => failed('请求超时，升级结果未确认。请重新连接热点并刷新页面检查。');
+  xhr.send(file);
+}
+
+async function refreshInfo() {
+  const info = document.getElementById('firmwareInfo');
+  try {
+    const r = await fetch('/api/info', { cache:'no-store' });
+    const d = await r.json();
+    if (!r.ok || !d.ok) throw new Error('读取失败');
+    info.textContent = '编程器版本：V' + d.version + ' · 编译时间：' + d.build_date + ' ' + d.build_time;
+  } catch(e) {
+    info.textContent = '编程器版本 / 编译时间：读取失败，请刷新页面重试';
+  }
+}
+
+refreshInfo();
 refreshFiles();
 updateSelUI();
 refreshStatus();

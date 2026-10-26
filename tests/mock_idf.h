@@ -58,7 +58,7 @@ esp_err_t nvs_get_str(nvs_handle_t, const char *, char *, size_t *);
 esp_err_t nvs_set_str(nvs_handle_t, const char *, const char *);
 esp_err_t nvs_commit(nvs_handle_t);
 
-typedef struct { int content_len; const char *query; char response[4096]; int status; } httpd_req_t;
+typedef struct { size_t content_len; const char *query; char response[4096]; int status; } httpd_req_t;
 typedef void *httpd_handle_t;
 typedef struct { int max_uri_handlers, stack_size, lru_purge_enable, recv_wait_timeout, send_wait_timeout; } httpd_config_t;
 typedef struct { const char *uri; int method; esp_err_t (*handler)(httpd_req_t *); } httpd_uri_t;
@@ -103,3 +103,25 @@ typedef struct { uint64_t pin_bit_mask; int mode, pull_up_en; } gpio_config_t;
 esp_err_t gpio_set_level(int, int);
 esp_err_t gpio_config(const gpio_config_t *);
 int gpio_get_level(int);
+
+typedef unsigned esp_ota_handle_t;
+typedef struct { size_t size; } esp_partition_t;
+typedef struct { uint8_t data[24]; } esp_image_header_t;
+typedef struct { uint8_t data[8]; } esp_image_segment_header_t;
+typedef struct {
+    uint32_t magic_word;
+    uint8_t metadata[12];
+    char version[32], project_name[32], time[16], date[16];
+    uint8_t padding[144];
+} esp_app_desc_t;
+#define ESP_IMAGE_HEADER_MAGIC 0xe9
+#define ESP_APP_DESC_MAGIC_WORD 0xabcd5432
+#define OTA_WITH_SEQUENTIAL_WRITES 0xfffffffe
+const esp_app_desc_t *esp_app_get_description(void);
+const esp_partition_t *esp_ota_get_next_update_partition(const esp_partition_t *);
+esp_err_t esp_ota_begin(const esp_partition_t *, size_t, esp_ota_handle_t *);
+esp_err_t esp_ota_write(esp_ota_handle_t, const void *, size_t);
+esp_err_t esp_ota_end(esp_ota_handle_t);
+esp_err_t esp_ota_abort(esp_ota_handle_t);
+esp_err_t esp_ota_set_boot_partition(const esp_partition_t *);
+void esp_restart(void);

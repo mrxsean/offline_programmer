@@ -12,6 +12,10 @@
 #include "esp_log.h"
 #include "esp_check.h"
 #include "esp_http_server.h"
+#include "esp_ota_ops.h"
+#include "esp_app_desc.h"
+#include "esp_app_format.h"
+#include "esp_system.h"
 #include "nvs.h"
 
 #include "storage.h"
@@ -570,6 +574,105 @@ static esp_err_t delete_handler(httpd_req_t *req)
     return err;
 }
 
+/* ---------------- programmer firmware OTA ---------------- */
+
+static esp_err_t receive_ota(httpd_req_t *req)
+{
+    const esp_partition_t *partition = esp_ota_get_next_update_partition(NULL);
+    const size_t header_size = sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t);
+    const size_t prefix_size = header_size + sizeof(esp_app_desc_t);
+    const char *error = "固件接收中断或超时";
+    int code = 400;
+    uint8_t *buf = NULL;
+    esp_ota_handle_t handle = 0;
+    bool active = false;
+
+    if (!partition) {
+        error = "缺少 OTA 分区，请先通过串口烧录新分区表和固件";
+        goto fail;
+    }
+    if (req->content_len < prefix_size || req->content_len > partition->size) {
+        error = "固件大小无效或超出 OTA 分区";
+        goto fail;
+    }
+    buf = malloc(4096);
+    if (!buf) {
+        error = "内存不足";
+        code = 500;
+        goto fail;
+    }
+    size_t received = 0;
+    while (received < prefix_size) {
+        int n = httpd_req_recv(req, (char *)buf + received, prefix_size - received);
+        if (n <= 0) goto fail;
+        received += n;
+    }
+    esp_app_desc_t desc;
+    memcpy(&desc, buf + header_size, sizeof(desc));
+    if (buf[0] != ESP_IMAGE_HEADER_MAGIC || desc.magic_word != ESP_APP_DESC_MAGIC_WORD ||
+        memcmp(desc.project_name, esp_app_get_description()->project_name,
+               sizeof(desc.project_name)) != 0) {
+        error = "请选择本编程器的应用固件 offline_programmer.bin";
+        goto fail;
+    }
+    if (esp_ota_begin(partition, OTA_WITH_SEQUENTIAL_WRITES, &handle) != ESP_OK) {
+        error = "无法开始 OTA";
+        code = 500;
+        goto fail;
+    }
+    active = true;
+    size_t chunk = received;
+    while (true) {
+        if (esp_ota_write(handle, buf, chunk) != ESP_OK) {
+            error = "固件写入失败";
+            code = 500;
+            goto fail;
+        }
+        if (received == req->content_len) break;
+        size_t remaining = req->content_len - received;
+        int n = httpd_req_recv(req, (char *)buf, remaining > 4096 ? 4096 : remaining);
+        if (n <= 0) goto fail;
+        chunk = n;
+        received += n;
+    }
+    esp_err_t err = esp_ota_end(handle);
+    active = false; /* esp_ota_end frees the handle even on validation failure. */
+    if (err != ESP_OK) {
+        error = "固件校验失败，请检查文件是否完整且适用于 ESP32-C3";
+        goto fail;
+    }
+    if (esp_ota_set_boot_partition(partition) != ESP_OK) {
+        error = "设置启动分区失败";
+        code = 500;
+        goto fail;
+    }
+    free(buf);
+    return ESP_OK;
+
+fail:
+    if (active) esp_ota_abort(handle);
+    free(buf);
+    send_json_error(req, code, error);
+    return ESP_FAIL; /* Close the connection, including any unread request body. */
+}
+
+static esp_err_t ota_handler(httpd_req_t *req)
+{
+    if (!try_idle_io()) {
+        send_json_error(req, 500, "设备忙，请稍后重试");
+        return ESP_FAIL;
+    }
+    if (receive_ota(req) != ESP_OK) {
+        xSemaphoreGive(s_prog.io_mu);
+        return ESP_FAIL;
+    }
+    /* Keep target/file operations locked until restart, even if the client disconnects. */
+    esp_err_t err = send_json(req, "{\"ok\":true,\"reboot\":true}");
+    vTaskDelay(pdMS_TO_TICKS(1500));
+    esp_restart();
+    return err;
+}
+
 /* Caller holds both io_mu and mu, as for HTTP selection. */
 static esp_err_t select_file_locked(const char *name)
 {
@@ -832,6 +935,26 @@ static esp_err_t send_json_string_chunked(httpd_req_t *req, const char *src, siz
     return ESP_OK;
 }
 
+static esp_err_t info_handler(httpd_req_t *req)
+{
+    const esp_app_desc_t *app = esp_app_get_description();
+    const char *keys[] = {"version", "build_date", "build_time"};
+    const char *values[] = {app->version, app->date, app->time};
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    esp_err_t err = httpd_resp_send_chunk(req, "{\"ok\":true", HTTPD_RESP_USE_STRLEN);
+    for (size_t i = 0; err == ESP_OK && i < 3; i++) {
+        char key[32];
+        snprintf(key, sizeof(key), ",\"%s\":\"", keys[i]);
+        err = httpd_resp_send_chunk(req, key, HTTPD_RESP_USE_STRLEN);
+        if (err == ESP_OK) err = send_json_string_chunked(req, values[i], strlen(values[i]));
+        if (err == ESP_OK) err = httpd_resp_send_chunk(req, "\"", HTTPD_RESP_USE_STRLEN);
+    }
+    if (err == ESP_OK) err = httpd_resp_send_chunk(req, "}", HTTPD_RESP_USE_STRLEN);
+    if (err == ESP_OK) err = httpd_resp_send_chunk(req, NULL, 0);
+    return err;
+}
+
 static esp_err_t status_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "application/json");
@@ -927,6 +1050,8 @@ esp_err_t http_server_start(void)
         { .uri = "/api/program", .method = HTTP_POST,   .handler = program_handler },
         { .uri = "/api/cancel",  .method = HTTP_POST,   .handler = cancel_handler },
         { .uri = "/api/status",  .method = HTTP_GET,    .handler = status_handler },
+        { .uri = "/api/ota",     .method = HTTP_POST,   .handler = ota_handler },
+        { .uri = "/api/info",    .method = HTTP_GET,    .handler = info_handler },
     };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &uris[i]), TAG, "register uri failed");

@@ -7,8 +7,10 @@ import tempfile
 
 root = Path(__file__).resolve().parents[1]
 headers = ['esp_err.h', 'esp_log.h', 'esp_check.h', 'esp_http_server.h',
-           'sdkconfig.h', 'nvs.h', 'esp_littlefs.h', 'freertos/FreeRTOS.h',
-           'freertos/task.h', 'freertos/semphr.h', 'driver/gpio.h', 'driver/i2c_master.h']
+           'sdkconfig.h', 'nvs.h', 'esp_littlefs.h', 'esp_ota_ops.h', 'esp_app_desc.h',
+           'esp_app_format.h', 'esp_system.h', 'freertos/FreeRTOS.h',
+           'freertos/task.h', 'freertos/semphr.h', 'driver/gpio.h', 'driver/i2c_master.h',
+           'esp_wifi.h', 'esp_event.h', 'esp_netif.h', 'esp_mac.h']
 with tempfile.TemporaryDirectory(prefix='programmer-tests-') as tmp:
     tmp = Path(tmp)
     for name in headers:
@@ -16,7 +18,7 @@ with tempfile.TemporaryDirectory(prefix='programmer-tests-') as tmp:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text('#include "mock_idf.h"\n')
     macos = sys.platform == 'darwin'
-    for name in ['programmer', 'front_panel']:
+    for name in ['programmer', 'front_panel', 'wifi_ap']:
         out = tmp / name
         cmd = ['gcc', '-std=gnu11', '-Wall', '-Wextra', '-Werror',
                '-Wno-unused-parameter', '-Wno-unused-variable',
