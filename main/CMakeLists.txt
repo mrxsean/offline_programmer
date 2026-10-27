@@ -5,6 +5,8 @@ idf_component_register(SRCS "app_main.c"
                             "wifi_ap.c"
                             "http_server.c"
                             "front_panel.c"
+                            "serial_debug.c"
+                            "io_debug.c"
                        INCLUDE_DIRS "."
                        EMBED_FILES "index.html"
-                       REQUIRES driver esp_wifi esp_netif esp_http_server app_update nvs_flash joltwallet__littlefs)
+                       REQUIRES driver esp_wifi esp_netif esp_http_server app_update esp_adc esp_timer json nvs_flash joltwallet__littlefs)

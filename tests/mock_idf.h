@@ -35,6 +35,8 @@ static inline size_t strlcpy(char *dst, const char *src, size_t n) {
 #define CONFIG_PROG_TOOL0_TX_GPIO 0
 #define CONFIG_PROG_TOOL0_RX_GPIO 1
 #define CONFIG_PROG_RESET_GPIO 2
+#define CONFIG_PROG_UART_NUM 1
+#define CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG 1
 
 typedef uint32_t TickType_t;
 typedef int *SemaphoreHandle_t;
@@ -46,6 +48,7 @@ typedef int *SemaphoreHandle_t;
 SemaphoreHandle_t xSemaphoreCreateMutex(void);
 int xSemaphoreTake(SemaphoreHandle_t mu, TickType_t wait);
 int xSemaphoreGive(SemaphoreHandle_t mu);
+void vSemaphoreDelete(SemaphoreHandle_t mu);
 int xTaskCreate(void (*task)(void *), const char *name, unsigned stack, void *arg, unsigned priority, void *handle);
 void vTaskDelete(void *task);
 void vTaskDelay(TickType_t delay);
@@ -96,13 +99,14 @@ esp_err_t i2c_master_probe(i2c_master_bus_handle_t, uint16_t, int);
 esp_err_t i2c_del_master_bus(i2c_master_bus_handle_t);
 esp_err_t i2c_master_bus_add_device(i2c_master_bus_handle_t, const i2c_device_config_t *, i2c_master_dev_handle_t *);
 esp_err_t i2c_master_bus_rm_device(i2c_master_dev_handle_t);
-typedef struct { uint64_t pin_bit_mask; int mode, pull_up_en; } gpio_config_t;
+typedef struct { uint64_t pin_bit_mask; int mode, pull_up_en, pull_down_en; } gpio_config_t;
 #define GPIO_MODE_OUTPUT 1
 #define GPIO_MODE_INPUT 2
 #define GPIO_PULLUP_ENABLE 1
 esp_err_t gpio_set_level(int, int);
 esp_err_t gpio_config(const gpio_config_t *);
 int gpio_get_level(int);
+esp_err_t gpio_reset_pin(int);
 
 typedef unsigned esp_ota_handle_t;
 typedef struct { size_t size; } esp_partition_t;
@@ -125,3 +129,27 @@ esp_err_t esp_ota_end(esp_ota_handle_t);
 esp_err_t esp_ota_abort(esp_ota_handle_t);
 esp_err_t esp_ota_set_boot_partition(const esp_partition_t *);
 void esp_restart(void);
+
+typedef void *QueueHandle_t;
+typedef struct { int type; size_t size; } uart_event_t;
+typedef struct { int baud_rate, data_bits, parity, stop_bits, flow_ctrl, source_clk; } uart_config_t;
+#define UART_NUM_0 0
+#define UART_DATA_8_BITS 8
+#define UART_PARITY_DISABLE 0
+#define UART_STOP_BITS_1 1
+#define UART_HW_FLOWCTRL_DISABLE 0
+#define UART_SCLK_DEFAULT 0
+#define UART_PIN_NO_CHANGE -1
+#define UART_FIFO_OVF 1
+#define UART_BUFFER_FULL 2
+#define UART_FRAME_ERR 3
+#define UART_PARITY_ERR 4
+int xQueueReceive(QueueHandle_t, void *, TickType_t);
+esp_err_t uart_driver_install(int, int, int, int, QueueHandle_t *, int);
+esp_err_t uart_driver_delete(int);
+esp_err_t uart_param_config(int, const uart_config_t *);
+esp_err_t uart_set_pin(int, int, int, int, int);
+esp_err_t uart_set_baudrate(int, uint32_t);
+int uart_read_bytes(int, void *, uint32_t, TickType_t);
+int uart_write_bytes(int, const void *, size_t);
+esp_err_t uart_wait_tx_done(int, TickType_t);

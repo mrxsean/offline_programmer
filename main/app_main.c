@@ -15,6 +15,7 @@
 #include "http_server.h"
 #include "rl78_prog.h"
 #include "front_panel.h"
+#include "serial_debug.h"
 
 static const char *TAG = "main";
 
@@ -29,6 +30,7 @@ void app_main(void)
 
     ESP_ERROR_CHECK(storage_init());
     ESP_ERROR_CHECK(rl78_prog_init());
+    ESP_ERROR_CHECK(serial_debug_init());
     ESP_ERROR_CHECK(wifi_ap_init());
     ESP_ERROR_CHECK(http_server_start());
     ESP_ERROR_CHECK(front_panel_init());

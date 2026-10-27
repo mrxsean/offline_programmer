@@ -4,21 +4,28 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import os
 
 root = Path(__file__).resolve().parents[1]
 headers = ['esp_err.h', 'esp_log.h', 'esp_check.h', 'esp_http_server.h',
            'sdkconfig.h', 'nvs.h', 'esp_littlefs.h', 'esp_ota_ops.h', 'esp_app_desc.h',
            'esp_app_format.h', 'esp_system.h', 'freertos/FreeRTOS.h',
            'freertos/task.h', 'freertos/semphr.h', 'driver/gpio.h', 'driver/i2c_master.h',
-           'esp_wifi.h', 'esp_event.h', 'esp_netif.h', 'esp_mac.h']
+           'esp_wifi.h', 'esp_event.h', 'esp_netif.h', 'esp_mac.h', 'driver/uart.h',
+           'freertos/queue.h']
 with tempfile.TemporaryDirectory(prefix='programmer-tests-') as tmp:
     tmp = Path(tmp)
     for name in headers:
         path = tmp / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text('#include "mock_idf.h"\n')
+    for name in ['driver/spi_master.h', 'esp_rom_sys.h', 'esp_timer.h', 'esp_adc/adc_oneshot.h',
+                 'esp_adc/adc_cali.h', 'esp_adc/adc_cali_scheme.h']:
+        path = tmp / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('#include "mock_io_idf.h"\n')
     macos = sys.platform == 'darwin'
-    for name in ['programmer', 'front_panel', 'wifi_ap']:
+    for name in ['programmer', 'front_panel', 'wifi_ap', 'serial_debug', 'io_debug']:
         out = tmp / name
         cmd = ['gcc', '-std=gnu11', '-Wall', '-Wextra', '-Werror',
                '-Wno-unused-parameter', '-Wno-unused-variable',
@@ -46,6 +53,10 @@ with tempfile.TemporaryDirectory(prefix='programmer-tests-') as tmp:
         if name == 'programmer' and not macos:
             cmd += [str(root / 'main/storage.c'), '-Wl,--wrap=storage_exists',
                     '-Wl,--wrap=storage_delete', '-Wl,--wrap=storage_list']
+        if name == 'io_debug':
+            idf = Path(os.environ.get('IDF_PATH', str(Path.home() / 'esp/v5.3/esp-idf')))
+            cjson = idf / 'components/json/cJSON'
+            cmd += ['-I' + str(cjson), str(cjson / 'cJSON.c')]
         cmd += ['-o', str(out)]
         subprocess.run(cmd, check=True)
         subprocess.run([str(out)], check=True)

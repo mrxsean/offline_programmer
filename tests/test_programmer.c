@@ -3,7 +3,7 @@
 const uint8_t index_html_start[] = {0};
 const uint8_t index_html_end[] = {0};
 esp_err_t esp_littlefs_info(const char *label, size_t *total, size_t *used) {
-    *total = 0x1e0000; *used = 0; return ESP_OK;
+    *total = 0x180000; *used = 0; return ESP_OK;
 }
 
 static int state_lock, io_lock, task_count;
@@ -84,13 +84,14 @@ static uint8_t ota_image[9000];
 static size_t ota_rx, ota_written, ota_fragment, ota_disconnect;
 static int ota_fail, ota_aborts, ota_ends, ota_boots, ota_restarts, ota_begins;
 static bool ota_partition_missing;
-static const esp_partition_t ota_partition = {.size = 0x100000};
+static bool serial_request;
+static const esp_partition_t ota_partition = {.size = 0x130000};
 static const esp_app_desc_t ota_desc = {
     .magic_word = ESP_APP_DESC_MAGIC_WORD, .project_name = "offline_programmer",
     .version = "1.0.0", .date = "Oct 26 2026", .time = "18:12:34"
 };
 int httpd_req_recv(httpd_req_t *r, char *dst, size_t len) {
-    assert(io_lock && programmer_start_selected() == ESP_ERR_INVALID_STATE);
+    if (!serial_request) assert(io_lock && programmer_start_selected() == ESP_ERR_INVALID_STATE);
     if (ota_rx >= ota_disconnect) return -1;
     if (len > ota_fragment) len = ota_fragment;
     if (len > ota_disconnect - ota_rx) len = ota_disconnect - ota_rx;
@@ -164,6 +165,84 @@ static void select_file(const char *query, bool ok) {
     httpd_req_t req = {.query = query};
     assert(select_handler(&req) == ESP_OK);
     assert(strstr(req.response, ok ? "\"ok\":true" : "\"ok\":false"));
+}
+
+static unsigned serial_sends;
+static unsigned io_requests;
+char *io_debug_execute(const char *request) {
+    io_requests++;
+    return strdup("{\"ok\":true}");
+}
+static esp_err_t serial_result;
+static uint32_t serial_baud;
+esp_err_t serial_debug_set_baud(uint32_t baud) {
+    if (baud != 115200) return ESP_ERR_INVALID_ARG;
+    serial_baud = baud; return ESP_OK;
+}
+esp_err_t serial_debug_read(uint64_t cursor, serial_debug_rx_t *rx) {
+    memset(rx, 0, sizeof(*rx));
+    rx->data[0] = 0; rx->data[1] = 0xff; rx->data[2] = 0x22;
+    rx->size = 3; rx->next = cursor + 3; rx->baud = 115200;
+    rx->lost = 2; rx->errors = 1; rx->more = true;
+    return serial_result;
+}
+esp_err_t serial_debug_send(const uint8_t *data, size_t size, size_t *written) {
+    assert(size <= 256 && memcmp(data, ota_image, size) == 0);
+    serial_sends++; *written = serial_result ? size - 1 : size; return serial_result;
+}
+static void test_serial_http(void) {
+    const char *invalid[] = {"", "baud=", "baud=-1", "baud=+1", "baud=115200x",
+                            "baud=4294967296", "baud=18446744073709551616", "baud=1"};
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        httpd_req_t r = {.query = invalid[i]};
+        assert(serial_config_handler(&r) == ESP_OK && r.status == 400);
+        assert(!serial_baud);
+    }
+    httpd_req_t config = {.query = "baud=115200"};
+    assert(serial_config_handler(&config) == ESP_OK && serial_baud == 115200);
+    httpd_req_t bad_cursor = {.query = "cursor=abc"};
+    serial_read_handler(&bad_cursor); assert(bad_cursor.status == 400);
+    httpd_req_t read = {.query = "cursor=7"};
+    assert(serial_read_handler(&read) == ESP_OK);
+    assert(strstr(read.response, "\"hex\":\"00FF22\""));
+    assert(strstr(read.response, "\"next\":10") && strstr(read.response, "\"lost\":2"));
+    serial_result = ESP_FAIL;
+    read.response[0] = 0;
+    serial_read_handler(&read); assert(read.status == 500);
+    serial_result = ESP_OK;
+    serial_request = true;
+    httpd_req_t empty = {0}, oversized = {.content_len = 257};
+    assert(serial_send_handler(&empty) == ESP_FAIL && empty.status == 400);
+    assert(serial_send_handler(&oversized) == ESP_FAIL && oversized.status == 400);
+    assert(!serial_sends);
+    for (unsigned i = 0; i < 256; i++) ota_image[i] = i;
+    ota_rx = 0; ota_fragment = 1; ota_disconnect = 2;
+    httpd_req_t interrupted = {.content_len = 256};
+    assert(serial_send_handler(&interrupted) == ESP_FAIL && !serial_sends);
+    ota_rx = 0; ota_disconnect = 256;
+    httpd_req_t sent = {.content_len = 256};
+    assert(serial_send_handler(&sent) == ESP_OK && serial_sends == 1);
+    assert(strstr(sent.response, "\"ok\":true") && strstr(sent.response, "\"written\":256"));
+    ota_rx = 0; serial_result = ESP_FAIL;
+    sent.response[0] = 0;
+    assert(serial_send_handler(&sent) == ESP_OK && sent.status == 500 && serial_sends == 2);
+    assert(strstr(sent.response, "\"ok\":false") && strstr(sent.response, "\"written\":255"));
+    serial_request = false;
+    serial_request = true;
+    httpd_req_t io_bad = {.content_len = 513};
+    assert(io_action_handler(&io_bad) == ESP_FAIL && !io_requests);
+    const char *body = "{\"op\":\"status\"}";
+    memcpy(ota_image, body, strlen(body));
+    ota_rx = 0; ota_fragment = 1; ota_disconnect = 3;
+    httpd_req_t io_req = {.content_len = strlen(body)};
+    assert(io_action_handler(&io_req) == ESP_FAIL && !io_requests);
+    ota_rx = 0; ota_disconnect = strlen(body);
+    ota_image[2] = 0;
+    io_action_handler(&io_req); assert(!io_requests);
+    memcpy(ota_image, body, strlen(body)); ota_rx = 0;
+    assert(io_action_handler(&io_req) == ESP_OK && io_requests == 1);
+    serial_request = false;
+    puts("serial HTTP: strict baud/cursor, binary HEX response, fragment/disconnect, size limit, partial TX PASS");
 }
 
 static void reset_ota(void) {
@@ -328,5 +407,6 @@ int main(void) {
     assert(info_handler(&info) == ESP_OK);
     assert(strcmp(info.response, "{\"ok\":true,\"version\":\"1.0.0\","
                   "\"build_date\":\"Oct 26 2026\",\"build_time\":\"18:12:34\"}") == 0);
+    test_serial_http();
     puts("programmer: persistence, invalid input, busy guards, full job, errors and cancellation PASS");
 }

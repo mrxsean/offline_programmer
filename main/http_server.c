@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <inttypes.h>
+#include <errno.h>
 #include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -21,6 +22,8 @@
 #include "storage.h"
 #include "image_parser.h"
 #include "rl78_prog.h"
+#include "serial_debug.h"
+#include "io_debug.h"
 
 static const char *TAG = "httpd";
 
@@ -1018,7 +1021,110 @@ static esp_err_t load_selection(void)
     return ESP_OK;
 }
 
+/* ---------------- external UART0 debug API ---------------- */
+
+static bool get_uint_param(httpd_req_t *req, const char *key, uint64_t *value)
+{
+    char text[24], *end;
+    if (!get_query_param(req, key, text, sizeof(text)) || text[0] < '0' || text[0] > '9') return false;
+    errno = 0;
+    *value = strtoull(text, &end, 10);
+    return !errno && !*end;
+}
+
+static esp_err_t serial_read_handler(httpd_req_t *req)
+{
+    uint64_t cursor;
+    if (!get_uint_param(req, "cursor", &cursor)) return send_json_error(req, 400, "接收位置无效");
+    serial_debug_rx_t rx;
+    if (serial_debug_read(cursor, &rx) != ESP_OK) return send_json_error(req, 500, "调试串口不可用");
+    char hex[SERIAL_DEBUG_RX_CHUNK * 2 + 1];
+    static const char digits[] = "0123456789ABCDEF";
+    for (size_t i = 0; i < rx.size; i++) {
+        hex[i * 2] = digits[rx.data[i] >> 4];
+        hex[i * 2 + 1] = digits[rx.data[i] & 15];
+    }
+    hex[rx.size * 2] = '\0';
+    char json[sizeof(hex) + 256];
+    snprintf(json, sizeof(json), "{\"ok\":true,\"hex\":\"%s\",\"next\":%" PRIu64
+             ",\"lost\":%" PRIu64 ",\"baud\":%" PRIu32 ",\"errors\":%" PRIu32
+             ",\"more\":%s,\"reset\":%s}", hex, rx.next, rx.lost, rx.baud, rx.errors,
+             rx.more ? "true" : "false", rx.reset ? "true" : "false");
+    return send_json(req, json);
+}
+
+static esp_err_t serial_config_handler(httpd_req_t *req)
+{
+    uint64_t baud;
+    if (!get_uint_param(req, "baud", &baud) || baud > UINT32_MAX)
+        return send_json_error(req, 400, "波特率无效");
+    esp_err_t err = serial_debug_set_baud(baud);
+    if (err != ESP_OK) return send_json_error(req, err == ESP_ERR_INVALID_ARG ? 400 : 500,
+                                             "设置波特率失败");
+    return send_json(req, "{\"ok\":true}");
+}
+
+static esp_err_t serial_send_handler(httpd_req_t *req)
+{
+    if (!req->content_len || req->content_len > SERIAL_DEBUG_TX_MAX) {
+        send_json_error(req, 400, "每次发送须为 1～256 字节");
+        return ESP_FAIL;
+    }
+    uint8_t data[SERIAL_DEBUG_TX_MAX];
+    size_t received = 0;
+    while (received < req->content_len) {
+        int n = httpd_req_recv(req, (char *)data + received, req->content_len - received);
+        if (n <= 0) {
+            send_json_error(req, 400, "发送数据接收中断，未写入串口");
+            return ESP_FAIL;
+        }
+        received += n;
+    }
+    size_t written;
+    esp_err_t err = serial_debug_send(data, received, &written);
+    char json[192];
+    if (err != ESP_OK) httpd_resp_set_status(req, "500 Internal Server Error");
+    snprintf(json, sizeof(json), "{\"ok\":%s,\"written\":%u,\"error\":\"%s\"}",
+             err == ESP_OK ? "true" : "false", (unsigned)written,
+             err == ESP_OK ? "" : "串口发送未完成，请勿直接重试以免重复发送");
+    return send_json(req, json);
+}
+
 /* ---------------- server setup ---------------- */
+
+static esp_err_t io_status_handler(httpd_req_t *req)
+{
+    char *json = io_debug_execute("{\"op\":\"status\"}");
+    if (!json) return send_json_error(req, 500, "内存不足");
+    esp_err_t err = send_json(req, json);
+    free(json);
+    return err;
+}
+
+static esp_err_t io_action_handler(httpd_req_t *req)
+{
+    if (!req->content_len || req->content_len > 512) {
+        send_json_error(req, 400, "调试请求大小无效");
+        return ESP_FAIL;
+    }
+    char body[513];
+    size_t received = 0;
+    while (received < req->content_len) {
+        int n = httpd_req_recv(req, body + received, req->content_len - received);
+        if (n <= 0) {
+            send_json_error(req, 400, "请求接收中断，未执行操作");
+            return ESP_FAIL;
+        }
+        received += n;
+    }
+    if (memchr(body, 0, received)) return send_json_error(req, 400, "JSON 格式无效");
+    body[received] = 0;
+    char *json = io_debug_execute(body);
+    if (!json) return send_json_error(req, 500, "内存不足");
+    esp_err_t err = send_json(req, json);
+    free(json);
+    return err;
+}
 
 esp_err_t http_server_start(void)
 {
@@ -1030,7 +1136,7 @@ esp_err_t http_server_start(void)
     ESP_RETURN_ON_ERROR(load_selection(), TAG, "load selection failed");
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 12;
+    config.max_uri_handlers = 20;
     config.stack_size = 8192;
     config.lru_purge_enable = true;
     config.recv_wait_timeout = 30;
@@ -1052,6 +1158,11 @@ esp_err_t http_server_start(void)
         { .uri = "/api/status",  .method = HTTP_GET,    .handler = status_handler },
         { .uri = "/api/ota",     .method = HTTP_POST,   .handler = ota_handler },
         { .uri = "/api/info",    .method = HTTP_GET,    .handler = info_handler },
+        { .uri = "/api/serial", .method = HTTP_GET,    .handler = serial_read_handler },
+        { .uri = "/api/serial/config", .method = HTTP_POST, .handler = serial_config_handler },
+        { .uri = "/api/serial/send", .method = HTTP_POST, .handler = serial_send_handler },
+        { .uri = "/api/io", .method = HTTP_GET, .handler = io_status_handler },
+        { .uri = "/api/io", .method = HTTP_POST, .handler = io_action_handler },
     };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &uris[i]), TAG, "register uri failed");

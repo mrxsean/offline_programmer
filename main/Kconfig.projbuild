@@ -22,8 +22,10 @@ menu "Offline Programmer Configuration"
     menu "RL78 Target Interface"
         config PROG_UART_NUM
             int "UART Port Number"
-            range 0 1
+            range 1 1
             default 1
+            help
+                UART0 is reserved for GPIO20/GPIO21 web serial debugging.
 
         config PROG_TOOL0_TX_GPIO
             int "TOOL0 TX GPIO"
