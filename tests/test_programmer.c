@@ -8,6 +8,7 @@ esp_err_t esp_littlefs_info(const char *label, size_t *total, size_t *used) {
 
 static int state_lock, io_lock, task_count;
 static bool task_fail, commit_fail, file_exists = true, target_fail, verify_fail, cancel_verify;
+static bool other_file_exists = true;
 static char saved[STORAGE_MAX_NAME], pending[STORAGE_MAX_NAME];
 static void (*worker)(void *);
 static void *worker_arg;
@@ -38,19 +39,22 @@ esp_err_t nvs_commit(nvs_handle_t h) {
     strlcpy(saved, pending, sizeof(saved)); return ESP_OK;
 }
 bool __wrap_storage_exists(const char *name) {
-    return file_exists && (strcmp(name, "App_v1.hex") == 0 || strcmp(name, "Other.bin") == 0);
+    return (file_exists && strcmp(name, "App_v1.hex") == 0) ||
+           (other_file_exists && strcmp(name, "Other.bin") == 0);
 }
 int __wrap_storage_list(storage_list_cb_t cb, void *ctx) {
-    if (!file_exists) return 0;
+    int count = 0;
     storage_file_info_t info = {.name = "Other.bin"};
-    cb(&info, ctx);
+    if (other_file_exists) { cb(&info, ctx); count++; }
     strlcpy(info.name, "App_v1.hex", sizeof(info.name));
-    cb(&info, ctx);
-    return 2;
+    if (file_exists) { cb(&info, ctx); count++; }
+    return count;
 }
 esp_err_t __wrap_storage_delete(const char *name) {
     if (!__wrap_storage_exists(name)) return ESP_ERR_NOT_FOUND;
-    file_exists = false; return ESP_OK;
+    if (strcmp(name, "App_v1.hex") == 0) file_exists = false;
+    else other_file_exists = false;
+    return ESP_OK;
 }
 esp_err_t httpd_resp_set_type(httpd_req_t *r, const char *s) { return ESP_OK; }
 esp_err_t httpd_resp_set_hdr(httpd_req_t *r, const char *k, const char *v) { return ESP_OK; }
@@ -165,6 +169,60 @@ static void select_file(const char *query, bool ok) {
     httpd_req_t req = {.query = query};
     assert(select_handler(&req) == ESP_OK);
     assert(strstr(req.response, ok ? "\"ok\":true" : "\"ok\":false"));
+}
+
+static void test_deleted_file_display(void) {
+    file_exists = other_file_exists = true;
+    boot();
+    select_file("file=App_v1.hex", true);
+    httpd_req_t other = {.query = "name=Other.bin"};
+    assert(delete_handler(&other) == ESP_OK && strstr(other.response, "\"ok\":true"));
+    prog_status_t status;
+    programmer_get_status(&status);
+    assert(strcmp(status.file, "App_v1.hex") == 0 && file_exists);
+    boot();
+    assert(strcmp(s_prog.file, "App_v1.hex") == 0);
+
+    other_file_exists = true;
+    assert(start_program("Other.bin", true, true, true) == ESP_OK);
+    run_worker();
+    programmer_get_status(&status);
+    assert(strcmp(status.file, "Other.bin") == 0 && status.state == PROG_DONE);
+    assert(delete_handler(&other) == ESP_OK && strstr(other.response, "\"ok\":true"));
+    programmer_get_status(&status);
+    assert(strcmp(status.file, "App_v1.hex") == 0);
+    assert(status.state == PROG_IDLE && status.percent == 0 && !status.cancelled);
+    assert(strcmp(saved, "App_v1.hex") == 0 && file_exists && !other_file_exists);
+
+    httpd_req_t selected = {.query = "name=App_v1.hex"};
+    assert(delete_handler(&selected) == ESP_OK && strstr(selected.response, "\"ok\":true"));
+    programmer_get_status(&status);
+    assert(!status.file[0] && !saved[0] && !file_exists);
+    boot();
+    programmer_get_status(&status);
+    assert(!status.file[0] && !s_prog.selected_file[0]);
+
+    /* A file can also disappear when the storage partition is reformatted. */
+    strlcpy(saved, "App_v1.hex", sizeof(saved));
+    boot();
+    programmer_get_status(&status);
+    assert(!status.file[0] && !s_prog.selected_file[0] && !saved[0]);
+    strlcpy(saved, "App_v1.hex", sizeof(saved));
+    commit_fail = true;
+    boot();
+    programmer_get_status(&status);
+    assert(!status.file[0] && !s_prog.selected_file[0]);
+    commit_fail = false;
+    boot();
+    assert(!saved[0]);
+
+    file_exists = true;
+    select_file("file=App_v1.hex", true);
+    file_exists = false;
+    assert(delete_handler(&selected) == ESP_OK && selected.status == 404);
+    programmer_get_status(&status);
+    assert(!status.file[0] && !saved[0]);
+    puts("programmer: selected/other/last-job deletion and missing boot selection PASS");
 }
 
 static unsigned serial_sends;
@@ -394,7 +452,7 @@ int main(void) {
     io_lock = 1;
     assert(programmer_select_next() == ESP_ERR_INVALID_STATE);
     io_lock = 0;
-    file_exists = false;
+    file_exists = other_file_exists = false;
     assert(programmer_select_next() == ESP_ERR_NOT_FOUND);
     assert(!state_lock && !io_lock);
     s_prog.dev_valid = true;
@@ -408,5 +466,6 @@ int main(void) {
     assert(strcmp(info.response, "{\"ok\":true,\"version\":\"1.0.0\","
                   "\"build_date\":\"Oct 26 2026\",\"build_time\":\"18:12:34\"}") == 0);
     test_serial_http();
+    test_deleted_file_display();
     puts("programmer: persistence, invalid input, busy guards, full job, errors and cancellation PASS");
 }

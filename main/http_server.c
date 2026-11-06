@@ -527,7 +527,8 @@ static esp_err_t delete_file(httpd_req_t *req)
         return send_json_error(req, 400, "文件名无效");
     }
     xSemaphoreTake(s_prog.mu, portMAX_DELAY);
-    if (strcmp(name, s_prog.selected_file) == 0) {
+    bool selected = strcmp(name, s_prog.selected_file) == 0;
+    if (selected) {
         esp_err_t err = nvs_set_str(s_prog.nvs, "selected", "");
         if (err == ESP_OK) err = nvs_commit(s_prog.nvs);
         if (err != ESP_OK) {
@@ -535,7 +536,12 @@ static esp_err_t delete_file(httpd_req_t *req)
             return send_json_error(req, 500, "清除固件选择失败");
         }
         s_prog.selected_file[0] = '\0';
-        s_prog.file[0] = '\0';
+    }
+    xSemaphoreGive(s_prog.mu);
+    esp_err_t err = storage_delete(name);
+    xSemaphoreTake(s_prog.mu, portMAX_DELAY);
+    if (selected || (err == ESP_OK && strcmp(name, s_prog.file) == 0)) {
+        strlcpy(s_prog.file, s_prog.selected_file, sizeof(s_prog.file));
         s_prog.state = PROG_IDLE;
         s_prog.percent = 0;
         s_prog.cancelled = false;
@@ -543,9 +549,7 @@ static esp_err_t delete_file(httpd_req_t *req)
         strlcpy(s_prog.stage, "空闲", sizeof(s_prog.stage));
     }
     xSemaphoreGive(s_prog.mu);
-    if (storage_delete(name) != ESP_OK) {
-        return send_json_error(req, 404, "文件不存在");
-    }
+    if (err != ESP_OK) return send_json_error(req, 404, "文件不存在");
     ESP_LOGI(TAG, "deleted %s", name);
     return send_json(req, "{\"ok\":true}");
 }
@@ -1016,7 +1020,13 @@ static esp_err_t load_selection(void)
     } else if (err != ESP_OK) {
         return err;
     }
-    if (!storage_name_valid(s_prog.selected_file)) s_prog.selected_file[0] = '\0';
+    if (s_prog.selected_file[0] &&
+        (!storage_name_valid(s_prog.selected_file) || !storage_exists(s_prog.selected_file))) {
+        s_prog.selected_file[0] = '\0';
+        err = nvs_set_str(s_prog.nvs, "selected", "");
+        if (err == ESP_OK) err = nvs_commit(s_prog.nvs);
+        if (err != ESP_OK) ESP_LOGW(TAG, "clear missing selection: %s", esp_err_to_name(err));
+    }
     strlcpy(s_prog.file, s_prog.selected_file, sizeof(s_prog.file));
     return ESP_OK;
 }
